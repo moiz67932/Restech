@@ -1,0 +1,11 @@
+{
+  "name": "@restec/connector-canonical-rest",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@restec/contracts": "0.1.0",
+    "@restec/connector-sdk": "0.1.0",
+    "@restec/security": "0.1.0"
+  }
+}

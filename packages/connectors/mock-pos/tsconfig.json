@@ -1,0 +1,6 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": { "composite": true, "outDir": "dist", "rootDir": "src" },
+  "include": ["src"],
+  "references": [{ "path": "../canonical-rest" }, { "path": "../../connector-sdk" }]
+}

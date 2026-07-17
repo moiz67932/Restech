@@ -1,0 +1,353 @@
+openapi: 3.1.0
+info:
+  title: Restec POS API
+  version: 2026-07-01
+  description: Vendor-neutral restaurant bill and payment-status integration API. Money is expressed as integer minor units.
+servers:
+  - url: https://sandbox-api.restec.io
+    description: Sandbox
+  - url: https://api.restec.io
+    description: Production
+security: [{ bearerAuth: [], requestSignature: [] }]
+paths:
+  /health:
+    get:
+      security: []
+      operationId: health
+      responses:
+        {
+          '200':
+            {
+              description: Healthy,
+              content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } },
+            },
+        }
+  /v1/locations/{locationId}/bills/{externalBillId}:
+    parameters:
+      [
+        { $ref: '#/components/parameters/LocationId' },
+        { $ref: '#/components/parameters/ExternalBillId' },
+        { $ref: '#/components/parameters/Timestamp' },
+        { $ref: '#/components/parameters/Signature' },
+        { $ref: '#/components/parameters/RequestId' },
+      ]
+    put:
+      operationId: upsertBill
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        {
+          required: true,
+          content: { application/json: { schema: { $ref: '#/components/schemas/BillInput' } } },
+        }
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Bill' },
+          '400': { $ref: '#/components/responses/Error' },
+          '401': { $ref: '#/components/responses/Error' },
+          '409': { $ref: '#/components/responses/Error' },
+          '422': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+        }
+    get:
+      operationId: getBill
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Bill' },
+          '401': { $ref: '#/components/responses/Error' },
+          '404': { $ref: '#/components/responses/Error' },
+        }
+  /v1/locations/{locationId}/bills/{externalBillId}/external-payments:
+    parameters:
+      [
+        { $ref: '#/components/parameters/LocationId' },
+        { $ref: '#/components/parameters/ExternalBillId' },
+        { $ref: '#/components/parameters/Timestamp' },
+        { $ref: '#/components/parameters/Signature' },
+        { $ref: '#/components/parameters/RequestId' },
+        { $ref: '#/components/parameters/IdempotencyKey' },
+      ]
+    post:
+      operationId: recordExternalPayment
+      requestBody:
+        {
+          required: true,
+          content:
+            { application/json: { schema: { $ref: '#/components/schemas/ExternalPayment' } } },
+        }
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Bill' },
+          '400': { $ref: '#/components/responses/Error' },
+          '409': { $ref: '#/components/responses/Error' },
+          '422': { $ref: '#/components/responses/Error' },
+        }
+  /v1/locations/{locationId}/tables:
+    parameters:
+      [
+        { $ref: '#/components/parameters/LocationId' },
+        { $ref: '#/components/parameters/Timestamp' },
+        { $ref: '#/components/parameters/Signature' },
+        { $ref: '#/components/parameters/RequestId' },
+      ]
+    get:
+      operationId: listTables
+      responses:
+        {
+          '200': { description: Public table mappings },
+          '401': { $ref: '#/components/responses/Error' },
+        }
+  /v1/test/scenarios:
+    post:
+      operationId: createSandboxScenario
+      parameters:
+        [
+          { $ref: '#/components/parameters/Timestamp' },
+          { $ref: '#/components/parameters/Signature' },
+          { $ref: '#/components/parameters/RequestId' },
+          { $ref: '#/components/parameters/IdempotencyKey' },
+        ]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                {
+                  schema:
+                    {
+                      type: object,
+                      additionalProperties: false,
+                      required: [location_id, scenario],
+                      properties:
+                        {
+                          location_id: { type: string, pattern: '^loc_' },
+                          scenario:
+                            {
+                              type: string,
+                              enum:
+                                [
+                                  payment.completed,
+                                  payment.failed,
+                                  payment.refunded,
+                                  partial_payment.completed,
+                                  duplicate_event,
+                                  delayed_event,
+                                  out_of_order_event,
+                                  webhook_timeout,
+                                  webhook_429,
+                                  webhook_500,
+                                  amount_mismatch,
+                                  bill_already_paid,
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        }
+      responses:
+        {
+          '202': { description: Scenario accepted },
+          '404': { description: Not available in production },
+        }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: rst_test_or_live_key }
+    requestSignature:
+      {
+        type: apiKey,
+        in: header,
+        name: X-Restec-Signature,
+        description: HMAC-SHA256 over timestamp,
+        method,
+        path,
+        and exact raw body bytes.,
+      }
+  parameters:
+    LocationId:
+      { name: locationId, in: path, required: true, schema: { type: string, pattern: '^loc_' } }
+    ExternalBillId:
+      {
+        name: externalBillId,
+        in: path,
+        required: true,
+        schema: { type: string, minLength: 1, maxLength: 128 },
+      }
+    Timestamp:
+      {
+        name: X-Restec-Timestamp,
+        in: header,
+        required: true,
+        schema: { type: integer, format: int64 },
+      }
+    Signature:
+      {
+        name: X-Restec-Signature,
+        in: header,
+        required: true,
+        schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' },
+      }
+    RequestId:
+      { name: X-Request-Id, in: header, required: true, schema: { type: string, pattern: '^req_' } }
+    IdempotencyKey:
+      {
+        name: Idempotency-Key,
+        in: header,
+        required: true,
+        schema: { type: string, minLength: 8, maxLength: 255 },
+      }
+  schemas:
+    Amount: { type: integer, minimum: 0, maximum: 2147483647 }
+    Item:
+      {
+        type: object,
+        additionalProperties: false,
+        required: [external_item_id, name, quantity, unit_amount, total_amount],
+        properties:
+          {
+            external_item_id: { type: string },
+            name: { type: string },
+            quantity: { type: integer, minimum: 1 },
+            unit_amount: { $ref: '#/components/schemas/Amount' },
+            total_amount: { $ref: '#/components/schemas/Amount' },
+            notes: { type: string },
+          },
+      }
+    Totals:
+      {
+        type: object,
+        additionalProperties: false,
+        required: [subtotal, tax, service_charge, discount, tip, grand_total],
+        properties:
+          {
+            subtotal: { $ref: '#/components/schemas/Amount' },
+            tax: { $ref: '#/components/schemas/Amount' },
+            service_charge: { $ref: '#/components/schemas/Amount' },
+            discount: { $ref: '#/components/schemas/Amount' },
+            tip: { $ref: '#/components/schemas/Amount' },
+            grand_total: { $ref: '#/components/schemas/Amount' },
+          },
+      }
+    BillInput:
+      {
+        type: object,
+        additionalProperties: false,
+        required: [external_table_id, version, currency, status, items, totals, occurred_at],
+        properties:
+          {
+            external_table_id: { type: string },
+            external_order_id: { type: string },
+            version: { type: integer, minimum: 1 },
+            currency: { type: string, pattern: '^[A-Z]{3}$' },
+            status: { type: string, enum: [open, completed, cancelled] },
+            order_status:
+              {
+                type: string,
+                enum: [open, accepted, preparing, ready, served, completed, cancelled],
+              },
+            items:
+              {
+                type: array,
+                minItems: 1,
+                maxItems: 250,
+                items: { $ref: '#/components/schemas/Item' },
+              },
+            totals: { $ref: '#/components/schemas/Totals' },
+            occurred_at: { type: string, format: date-time },
+            metadata: { type: object, maxProperties: 100 },
+          },
+      }
+    ExternalPayment:
+      {
+        type: object,
+        additionalProperties: false,
+        required: [external_payment_id, method, amount, currency, status, occurred_at],
+        properties:
+          {
+            external_payment_id: { type: string },
+            method: { type: string, enum: [cash, card_terminal, wallet_terminal, voucher, other] },
+            amount: { $ref: '#/components/schemas/Amount' },
+            currency: { type: string },
+            status: { const: completed },
+            occurred_at: { type: string, format: date-time },
+            processor_reference: { type: string },
+            metadata: { type: object },
+          },
+      }
+    BillState:
+      {
+        type: object,
+        required:
+          [
+            request_id,
+            restec_bill_id,
+            external_bill_id,
+            payment_status,
+            grand_total,
+            amount_paid,
+            amount_refunded,
+            amount_due,
+            version,
+          ],
+        properties:
+          {
+            request_id: { type: string, pattern: '^req_' },
+            restec_bill_id: { type: string, pattern: '^bil_' },
+            external_bill_id: { type: string },
+            external_table_id: { type: string },
+            sync_status: { const: accepted },
+            order_status: { type: string },
+            payment_status: { type: string },
+            table_session_status: { type: string },
+            currency: { type: string },
+            grand_total: { $ref: '#/components/schemas/Amount' },
+            amount_paid: { $ref: '#/components/schemas/Amount' },
+            amount_refunded: { $ref: '#/components/schemas/Amount' },
+            amount_due: { $ref: '#/components/schemas/Amount' },
+            version: { type: integer },
+            updated_at: { type: string, format: date-time },
+          },
+      }
+    Health:
+      {
+        type: object,
+        additionalProperties: false,
+        required: [status, environment, version],
+        properties:
+          {
+            status: { const: ok },
+            environment: { enum: [sandbox, production, test] },
+            version: { type: string },
+          },
+      }
+    Error:
+      {
+        type: object,
+        required: [error],
+        properties:
+          {
+            error:
+              {
+                type: object,
+                required: [code, message, request_id, details],
+                properties:
+                  {
+                    code: { type: string },
+                    message: { type: string },
+                    request_id: { type: string },
+                    details: { type: object },
+                  },
+              },
+          },
+      }
+  responses:
+    Bill:
+      {
+        description: Canonical bill state,
+        content: { application/json: { schema: { $ref: '#/components/schemas/BillState' } } },
+      }
+    Error:
+      {
+        description: Stable Restec error,
+        content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } },
+      }

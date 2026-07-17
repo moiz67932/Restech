@@ -1,0 +1,9 @@
+{
+  "name": "@restec/connector-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@restec/contracts": "0.1.0"
+  }
+}

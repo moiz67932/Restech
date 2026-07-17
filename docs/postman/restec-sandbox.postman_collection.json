@@ -1,0 +1,27 @@
+{
+  "info": {
+    "name": "Restec Sandbox API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://sandbox-api.restec.io" },
+    { "key": "apiKey", "value": "rst_test_example" },
+    { "key": "locationId", "value": "loc_example" }
+  ],
+  "item": [
+    { "name": "Health", "request": { "method": "GET", "url": "{{baseUrl}}/health" } },
+    {
+      "name": "List tables",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{apiKey}}" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{requestId}}" }
+        ],
+        "url": "{{baseUrl}}/v1/locations/{{locationId}}/tables"
+      }
+    }
+  ]
+}

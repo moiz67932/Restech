@@ -1,0 +1,5 @@
+# Database Schema
+
+Tenant and access tables are `partners`, `partner_users`, `restaurants`, `locations`, and `api_keys`. Connector state uses `pos_connections`, `pos_tables`, `table_mappings`, and encrypted `webhook_endpoints`. Financial mappings use `bill_mappings` and `external_payments`. Reliability uses `idempotency_records`, `replay_records`, `paely_event_inbox`, `pos_outbox_events`, and `webhook_delivery_attempts`. `audit_logs` records controlled actions with sanitized metadata.
+
+Unique constraints protect key prefixes, environment/location connections, external table mappings, external bills/payments, request IDs, private event IDs, public event IDs, and logical delivery deduplication. Claim indexes support pending work and expiring leases. Financial, delivery, and audit relationships restrict deletion. RLS is enabled; browser roles cannot read integration or financial tables. `accept_private_event` atomically inserts inbox and outbox rows, while `claim_pos_outbox` uses `FOR UPDATE SKIP LOCKED`.

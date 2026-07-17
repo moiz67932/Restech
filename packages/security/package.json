@@ -1,0 +1,10 @@
+{
+  "name": "@restec/security",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@restec/contracts": "0.1.0",
+    "zod": "^3.24.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@restec/connector-mock-pos",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@restec/connector-canonical-rest": "0.1.0",
+    "@restec/connector-sdk": "0.1.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/security" },
+    { "path": "packages/paely-client" },
+    { "path": "packages/connector-sdk" },
+    { "path": "packages/connectors/canonical-rest" },
+    { "path": "packages/connectors/mock-pos" },
+    { "path": "packages/connector-registry" },
+    { "path": "packages/webhook-delivery" },
+    { "path": "apps/api" }
+  ]
+}

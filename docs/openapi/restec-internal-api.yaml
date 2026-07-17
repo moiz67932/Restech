@@ -1,0 +1,28 @@
+openapi: 3.1.0
+info:
+  {
+    title: Restec Internal API,
+    version: 2026-07-01,
+    description: Private server-to-server operations. Never publish this specification.,
+  }
+paths:
+  /api/internal/events/paely/v1:
+    post:
+      {
+        operationId: acceptPrivatePaymentEvent,
+        responses:
+          {
+            '202': { description: Durably accepted },
+            '200': { description: Duplicate already accepted },
+          },
+      }
+  /api/internal/jobs/dispatch-pos-events:
+    post:
+      {
+        operationId: dispatchPosEvents,
+        responses:
+          {
+            '202': { description: Dispatch accepted },
+            '404': { description: Hidden from unauthorized callers },
+          },
+      }
