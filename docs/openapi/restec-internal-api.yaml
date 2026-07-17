@@ -26,3 +26,10 @@ paths:
             '404': { description: Hidden from unauthorized callers },
           },
       }
+  /api/internal/jobs/reconcile:
+    post:
+      operationId: reconcileBill
+      responses:
+        '200': { description: Comparison result }
+        '202': { description: Manual review accepted }
+        '404': { description: Hidden from unauthorized callers }

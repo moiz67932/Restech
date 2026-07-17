@@ -19,6 +19,15 @@
     "validate:openapi": "node --import tsx scripts/validate-openapi.ts",
     "check:migrations": "node --import tsx scripts/check-migrations.ts",
     "create:connector": "node --import tsx scripts/create-connector.ts",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:lint": "supabase db lint --local",
+    "db:types": "supabase gen types typescript --local --schema public > packages/database/src/database.types.ts",
+    "test:database": "node --import tsx --test packages/database/src/*.integration.test.ts",
+    "test:e2e:sandbox": "node --import tsx --test apps/api/src/*.e2e.test.ts",
+    "create:sandbox-credentials": "node --import tsx scripts/create-sandbox-credentials.ts",
+    "certify:paely-sandbox": "node --import tsx scripts/certify-paely-sandbox.ts",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run validate:openapi && npm run test:leakage && npm run check:migrations && npm run build"
   },
   "devDependencies": {
@@ -29,6 +38,7 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.0.0",
-    "yaml": "^2.6.0"
+    "yaml": "^2.6.0",
+    "supabase": "^2.0.0"
   }
 }

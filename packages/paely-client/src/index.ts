@@ -65,12 +65,22 @@ export class PaelyClient {
     body: CanonicalBillInput,
     idempotencyKey: string,
   ) {
-    return this.request(
+    return (await this.upsertBillDetailed(locationId, externalBillId, body, idempotencyKey))
+      .publicState;
+  }
+  async upsertBillDetailed(
+    locationId: string,
+    externalBillId: string,
+    body: CanonicalBillInput,
+    idempotencyKey: string,
+  ): Promise<{ publicState: PublicBillState; privateBillReference: string }> {
+    const data = (await this.rawRequest(
       'PUT',
       `/api/internal/integrations/restec/v1/locations/${encodeURIComponent(locationId)}/bills/${encodeURIComponent(externalBillId)}`,
       body,
       idempotencyKey,
-    );
+    )) as PrivateBillState;
+    return { publicState: this.sanitizeBill(data), privateBillReference: data.integration_bill_id };
   }
   async getBill(locationId: string, externalBillId: string) {
     return this.request(
@@ -117,6 +127,9 @@ export class PaelyClient {
     idempotencyKey?: string,
   ): Promise<PublicBillState> {
     const data = (await this.rawRequest(method, path, body, idempotencyKey)) as PrivateBillState;
+    return this.sanitizeBill(data);
+  }
+  private sanitizeBill(data: PrivateBillState): PublicBillState {
     const safe = { ...data } as Partial<PrivateBillState>;
     delete safe.integration_bill_id;
     delete safe.paely_order_id;

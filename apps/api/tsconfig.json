@@ -1,11 +1,14 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "composite": true, "outDir": "dist", "rootDir": "src" },
-  "include": ["src"],
+  "compilerOptions": { "composite": true, "outDir": "dist", "rootDir": "." },
+  "include": ["src", "api"],
   "references": [
     { "path": "../../packages/contracts" },
+    { "path": "../../packages/database" },
     { "path": "../../packages/security" },
     { "path": "../../packages/paely-client" },
-    { "path": "../../packages/connector-registry" }
+    { "path": "../../packages/rate-limiting" },
+    { "path": "../../packages/connector-registry" },
+    { "path": "../../packages/webhook-delivery" }
   ]
 }

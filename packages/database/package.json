@@ -4,6 +4,8 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@restec/contracts": "0.1.0",
+    "@restec/security": "0.1.0",
     "@supabase/supabase-js": "^2.49.0"
   }
 }

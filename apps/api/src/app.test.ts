@@ -3,7 +3,10 @@ import test from 'node:test';
 import { signEvent } from '@restec/security';
 import { createApp } from './app.js';
 import { MemoryRepository } from './memory-repository.js';
-const config = {
+import type { Config } from './config.js';
+const config: Config = {
+  NODE_ENV: 'test',
+  RESTEC_REPOSITORY_DRIVER: 'memory',
   RESTEC_ENV: 'test' as const,
   RESTEC_PUBLIC_BASE_URL: 'http://localhost',
   RESTEC_TIMESTAMP_TOLERANCE_SECONDS: 300,
@@ -11,6 +14,15 @@ const config = {
   RESTEC_POS_DELIVERY_TIMEOUT_MS: 1000,
   RESTEC_MAX_DELIVERY_ATTEMPTS: 3,
   RESTEC_DISPATCH_BATCH_SIZE: 10,
+  PAELY_PRIVATE_BASE_URL: 'https://private.example',
+  PAELY_SERVICE_ID: 'service',
+  PAELY_PRIVATE_BEARER_TOKEN: '1234567890123456',
+  PAELY_PRIVATE_SIGNING_SECRET: '1234567890123456',
+  PAELY_EVENT_SIGNING_SECRET: '1234567890123456',
+  RESTEC_API_KEY_HASH_SECRET: '12345678901234567890123456789012',
+  RESTEC_SECRET_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64'),
+  RESTEC_INTERNAL_JOB_TOKEN: '1234567890123456',
+  RESTEC_STRICT_RATE_LIMITING: false,
 };
 test('health exposes only safe fields', async () => {
   const app = createApp({
@@ -25,6 +37,18 @@ test('health exposes only safe fields', async () => {
 });
 test('private event is durably deduplicated before response', async () => {
   const repo = new MemoryRepository();
+  repo.connections.set('con_test', {
+    connectionId: 'con_test',
+    partnerId: 'ptr_test',
+    locationId: 'loc_test',
+    environment: 'sandbox',
+    connectorType: 'mock_pos',
+    connectorVersion: '1.0.0',
+    connectorEnabled: true,
+    privateLocationId: '00000000-0000-0000-0000-000000000002',
+    privateConnectionId: '00000000-0000-0000-0000-000000000001',
+    configuration: { failure_mode: 'success' },
+  });
   const app = createApp({
     repository: repo,
     privateClient: {} as never,

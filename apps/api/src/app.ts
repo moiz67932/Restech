@@ -4,6 +4,10 @@ import { ZodError, z } from 'zod';
 import { billSchema, eventSchema, externalPaymentSchema } from '@restec/contracts';
 import { derivePrivateIdempotencyKey, type PaelyClient } from '@restec/paely-client';
 import { sha256, verifyEventSignature, verifyTimestamp } from '@restec/security';
+import { ConnectorRegistry } from '@restec/connector-registry';
+import { assertSafeWebhookUrl, retryDelaySeconds } from '@restec/webhook-delivery';
+import type { RateLimiter } from '@restec/rate-limiting';
+import { ReconciliationService } from './reconciliation.js';
 import type { Config } from './config.js';
 import { publicAuth, requestHash } from './auth.js';
 import { ApiError, type Repository } from './types.js';
@@ -43,28 +47,32 @@ export function createApp(deps: {
   config: Config;
   eventSigningSecret: string;
   internalJobToken: string;
+  connectorRegistry?: ConnectorRegistry;
+  rateLimiter?: RateLimiter;
 }) {
+  const registry = deps.connectorRegistry ?? new ConnectorRegistry();
+  const reconciliation = new ReconciliationService(deps.repository, deps.privateClient);
   const app = new Hono();
   app.get('/health', (c) =>
     c.json({ status: 'ok', environment: deps.config.RESTEC_ENV, version: '0.1.0' }),
   );
   const api = new Hono();
-  api.use('/v1/*', publicAuth(deps.repository, deps.config));
+  api.use('/v1/*', publicAuth(deps.repository, deps.config, deps.rateLimiter));
   const connection = async (c: any) => {
     const credential = c.get('credential');
-    const found = await deps.repository.findConnection(
+    const found = await deps.repository.authorizeLocation(
       c.req.param('locationId'),
       credential.partnerId,
+      deps.config.RESTEC_ENV === 'production' ? 'production' : 'sandbox',
     );
-    if (!found || !credential.locations.has(c.req.param('locationId')))
-      throw new ApiError(403, 'access_denied', 'Access to this location is denied.');
+    if (!found) throw new ApiError(403, 'access_denied', 'Access to this location is denied.');
     return found;
   };
   const idempotent = async (c: any, operation: string, work: (key: string) => Promise<unknown>) => {
     const key = c.req.header('Idempotency-Key');
     if (!key) throw new ApiError(400, 'invalid_request', 'An idempotency key is required.');
     const path = new URL(c.req.url).pathname;
-    const begin = await deps.repository.beginIdempotency(c.get('credential').partnerId, key, {
+    const begin = await deps.repository.reserveIdempotency(c.get('credential').partnerId, key, {
       requestHash: requestHash(c.req.method, path, c.get('rawBody')),
       method: c.req.method,
       path,
@@ -81,17 +89,22 @@ export function createApp(deps: {
       });
     if (begin.kind === 'replay')
       return c.json(begin.result.responseBody as any, begin.result.responseStatus as any);
-    const result = await work(
-      derivePrivateIdempotencyKey(c.get('credential').partnerId, key, operation),
-    );
-    await deps.repository.completeIdempotency(c.get('credential').partnerId, key, 200, result);
-    return c.json(result as any);
+    try {
+      const result = await work(
+        derivePrivateIdempotencyKey(c.get('credential').partnerId, key, operation),
+      );
+      await deps.repository.completeIdempotency(c.get('credential').partnerId, key, 200, result);
+      return c.json(result as any);
+    } catch (error) {
+      await deps.repository.releaseIdempotency(c.get('credential').partnerId, key);
+      throw error;
+    }
   };
   api.put('/v1/locations/:locationId/bills/:externalBillId', async (c) =>
     idempotent(c, 'bill_upsert', async (privateKey) => {
       const con = await connection(c);
       const body = billSchema.parse(parseRaw(c.get('rawBody')));
-      const state = await deps.privateClient.upsertBill(
+      const privateResult = await deps.privateClient.upsertBillDetailed(
         con.privateLocationId,
         c.req.param('externalBillId'),
         body,
@@ -99,16 +112,22 @@ export function createApp(deps: {
       );
       const result = {
         request_id: c.get('requestId'),
-        restec_bill_id: `bil_${sha256(`${con.id}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
-        ...state,
+        restec_bill_id: `bil_${sha256(`${con.connectionId}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
+        ...privateResult.publicState,
       };
-      await deps.repository.saveBill(con.id, c.req.param('externalBillId'), result);
-      return result;
+      return deps.repository.saveBillState(
+        con.connectionId,
+        c.req.param('externalBillId'),
+        body,
+        result as any,
+        requestHash(c.req.method, new URL(c.req.url).pathname, c.get('rawBody')),
+        privateResult.privateBillReference,
+      );
     }),
   );
   api.get('/v1/locations/:locationId/bills/:externalBillId', async (c) => {
     const con = await connection(c);
-    const value = await deps.repository.getBill(con.id, c.req.param('externalBillId'));
+    const value = await deps.repository.getBill(con.connectionId, c.req.param('externalBillId'));
     if (!value) throw new ApiError(404, 'resource_not_found', 'The requested bill was not found.');
     return c.json(value as any);
   });
@@ -124,18 +143,23 @@ export function createApp(deps: {
       );
       const result = {
         request_id: c.get('requestId'),
-        restec_bill_id: `bil_${sha256(`${con.id}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
+        restec_bill_id: `bil_${sha256(`${con.connectionId}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
         ...state,
       };
-      await deps.repository.saveBill(con.id, c.req.param('externalBillId'), result);
-      return result;
+      return deps.repository.saveExternalPayment(
+        con.connectionId,
+        c.req.param('externalBillId'),
+        body,
+        result as any,
+        requestHash(c.req.method, new URL(c.req.url).pathname, c.get('rawBody')),
+      );
     }),
   );
   api.get('/v1/locations/:locationId/tables', async (c) => {
     const con = await connection(c);
     return c.json({
       request_id: c.get('requestId'),
-      data: await deps.repository.listTables(con.id),
+      data: await deps.repository.listTables(con.connectionId),
     });
   });
   api.post('/v1/test/scenarios', async (c) => {
@@ -161,13 +185,14 @@ export function createApp(deps: {
       })
       .strict()
       .parse(parseRaw(c.get('rawBody')));
-    const con = await deps.repository.findConnection(
+    const con = await deps.repository.authorizeLocation(
       body.location_id,
       c.get('credential').partnerId,
+      'sandbox',
     );
     if (!con)
       throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
-    return c.json(await deps.repository.createSandboxEvent(con.id, body.scenario), 202);
+    return c.json(await deps.repository.createSandboxEvent(con.connectionId, body.scenario), 202);
   });
   app.route('/', api);
   app.post('/api/internal/events/paely/v1', async (c) => {
@@ -183,13 +208,23 @@ export function createApp(deps: {
     const incoming = privateEvent.parse(parseRaw(raw));
     if (incoming.id !== privateId)
       throw new ApiError(400, 'invalid_request', 'The event identifier is inconsistent.');
+    if (incoming.schema_version !== '2026-07-01')
+      throw new ApiError(400, 'invalid_request', 'The event schema version is not supported.');
+    const con = await deps.repository.getConnectionForPrivateEvent(incoming.data.connection_id);
+    if (
+      !con ||
+      con.environment !== (deps.config.RESTEC_ENV === 'production' ? 'production' : 'sandbox')
+    )
+      throw new ApiError(404, 'resource_not_found', 'The event connection was not found.');
+    if (incoming.data.location_id !== con.privateLocationId)
+      throw new ApiError(403, 'access_denied', 'The event location is not authorized.');
     const publicEvent = eventSchema.parse({
       id: `evt_${sha256(incoming.id).slice(0, 24)}`,
       type: incoming.type,
       schema_version: '2026-07-01',
       created_at: new Date().toISOString(),
       data: {
-        location_id: `loc_${sha256(incoming.data.location_id).slice(0, 20)}`,
+        location_id: con.locationId,
         external_bill_id: incoming.data.external_bill_id,
         external_table_id: incoming.data.external_table_id,
         payment: {
@@ -206,7 +241,7 @@ export function createApp(deps: {
       privateEventId: incoming.id,
       eventType: incoming.type,
       schemaVersion: incoming.schema_version,
-      connectionId: incoming.data.connection_id,
+      connectionId: con.connectionId,
       requestHash: sha256(raw),
       payload: incoming,
       publicEventId: publicEvent.id,
@@ -217,7 +252,105 @@ export function createApp(deps: {
   app.post('/api/internal/jobs/dispatch-pos-events', async (c) => {
     if (c.req.header('Authorization') !== `Bearer ${deps.internalJobToken}`)
       throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
-    return c.json({ accepted: true }, 202);
+    await deps.repository.releaseExpiredLeases();
+    const claimed = await deps.repository.claimPosOutboxEvents(
+      deps.config.RESTEC_DISPATCH_BATCH_SIZE,
+      60,
+    );
+    let delivered = 0,
+      retried = 0,
+      deadLettered = 0;
+    for (const event of claimed) {
+      const attempt = event.attemptCount + 1;
+      const started = Date.now();
+      let outcome: 'delivered' | 'retry' | 'permanent_failure' = 'retry';
+      let status: number | undefined;
+      let errorCode: string | undefined;
+      try {
+        const connector = registry.resolve(
+          event.connectorType,
+          event.connectorVersion,
+          event.connectorEnabled,
+        );
+        const context = {
+          partnerId: 'system',
+          connectionId: event.connectionId,
+          locationId: event.payload.data.location_id,
+          environment: deps.config.RESTEC_ENV,
+          configuration: event.configuration,
+        } as const;
+        const payload = await connector.serializeEvent(event.payload, context);
+        await assertSafeWebhookUrl(payload.destination, deps.config.RESTEC_ENV);
+        const result = await connector.deliverEvent(payload, {
+          ...context,
+          eventId: event.publicEventId,
+          attempt,
+          timeoutMs: deps.config.RESTEC_POS_DELIVERY_TIMEOUT_MS,
+        });
+        outcome = result.outcome;
+        status = result.status;
+        errorCode = result.errorCode;
+      } catch {
+        outcome = 'retry';
+        errorCode = 'delivery_error';
+      }
+      const deliveryAttempt = {
+        eventId: event.id,
+        attemptNumber: attempt,
+        outcome,
+        durationMs: Date.now() - started,
+      };
+      await deps.repository.recordDeliveryAttempt({
+        ...deliveryAttempt,
+        ...(status === undefined ? {} : { responseStatus: status }),
+        ...(errorCode === undefined ? {} : { errorCode }),
+      });
+      if (outcome === 'delivered') {
+        await deps.repository.markOutboxDelivered(event.id);
+        delivered++;
+      } else if (
+        outcome === 'permanent_failure' ||
+        attempt >= deps.config.RESTEC_MAX_DELIVERY_ATTEMPTS
+      ) {
+        await deps.repository.markOutboxDeadLetter(event.id, errorCode ?? 'delivery_failed');
+        deadLettered++;
+      } else {
+        await deps.repository.scheduleOutboxRetry(
+          event.id,
+          new Date(Date.now() + retryDelaySeconds(attempt) * 1000),
+          errorCode ?? 'delivery_failed',
+        );
+        retried++;
+      }
+    }
+    return c.json(
+      { accepted: true, claimed: claimed.length, delivered, retried, dead_lettered: deadLettered },
+      202,
+    );
+  });
+  app.post('/api/internal/jobs/reconcile', async (c) => {
+    if (c.req.header('Authorization') !== `Bearer ${deps.internalJobToken}`)
+      throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
+    const input = z
+      .object({
+        partner_id: z.string().startsWith('ptr_'),
+        location_id: z.string().startsWith('loc_'),
+        external_bill_id: z.string().min(1),
+        action: z.enum(['compare', 'mark_manual_review']).default('compare'),
+      })
+      .strict()
+      .parse(await c.req.json());
+    const con = await deps.repository.authorizeLocation(
+      input.location_id,
+      input.partner_id,
+      deps.config.RESTEC_ENV === 'production' ? 'production' : 'sandbox',
+    );
+    if (!con) throw new ApiError(404, 'resource_not_found', 'The requested bill was not found.');
+    if (input.action === 'mark_manual_review') {
+      await reconciliation.markManualReview(con, input.external_bill_id, 'reconciliation_job');
+      return c.json({ accepted: true, status: 'review_required' }, 202);
+    }
+    return c.json(await reconciliation.compare(con, input.external_bill_id));
   });
   app.onError((error, c) => {
     const requestId = c.get('requestId') ?? `req_${randomUUID().replaceAll('-', '')}`;

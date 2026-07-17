@@ -1,0 +1,17 @@
+name: Phase 2 verification
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: . } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run verify
+      - run: npm run db:start
+      - run: npm run db:reset
+      - run: npm run db:lint
+      - run: npm run db:types
+      - run: eval "$(npx supabase status -o env)"; SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" RUN_DATABASE_INTEGRATION=true npm run test:database

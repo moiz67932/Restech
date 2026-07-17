@@ -10,9 +10,16 @@
     "@hono/node-server": "^1.13.0",
     "@restec/connector-registry": "0.1.0",
     "@restec/contracts": "0.1.0",
+    "@restec/database": "0.1.0",
     "@restec/paely-client": "0.1.0",
+    "@restec/rate-limiting": "0.1.0",
     "@restec/security": "0.1.0",
+    "@restec/webhook-delivery": "0.1.0",
     "hono": "^4.7.0",
     "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   }
 }
