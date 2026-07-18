@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -b tsconfig.json"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
