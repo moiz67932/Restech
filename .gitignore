@@ -6,4 +6,5 @@ dist/
 !.env.example
 coverage/
 *.log
+*.tsbuildinfo
 .vercel/
