@@ -124,7 +124,22 @@ export const eventSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((event, ctx) => {
+    const { bill } = event.data;
+    if (bill.amount_due !== Math.max(0, bill.grand_total - bill.amount_paid + bill.amount_refunded))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['data', 'bill', 'amount_due'],
+        message: 'Bill amounts are inconsistent',
+      });
+    if (bill.payment_status === 'paid' && bill.amount_due !== 0)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['data', 'bill', 'payment_status'],
+        message: 'Paid bills must have no amount due',
+      });
+  });
 export type CanonicalBillInput = z.infer<typeof billSchema>;
 export type CanonicalExternalPaymentInput = z.infer<typeof externalPaymentSchema>;
 export type CanonicalRestecEvent = z.infer<typeof eventSchema>;

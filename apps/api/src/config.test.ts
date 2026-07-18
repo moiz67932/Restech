@@ -24,3 +24,8 @@ test('Supabase driver fails fast without server credentials', () =>
     () => loadConfig({ ...env, RESTEC_ENV: 'sandbox', RESTEC_REPOSITORY_DRIVER: 'supabase' }),
     /configuration is incomplete/,
   ));
+test('string false does not enable strict rate limiting', () =>
+  assert.equal(
+    loadConfig({ ...env, RESTEC_STRICT_RATE_LIMITING: 'false' }).RESTEC_STRICT_RATE_LIMITING,
+    false,
+  ));

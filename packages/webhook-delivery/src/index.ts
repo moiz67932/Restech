@@ -12,6 +12,22 @@ const unsafeV4 = (host: string) => {
     p[0] === 0
   );
 };
+const unsafeV6 = (host: string) => {
+  const value = host.toLowerCase();
+  if (
+    value === '::' ||
+    value === '::1' ||
+    value.startsWith('fe8') ||
+    value.startsWith('fe9') ||
+    value.startsWith('fea') ||
+    value.startsWith('feb') ||
+    value.startsWith('fc') ||
+    value.startsWith('fd')
+  )
+    return true;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(value);
+  return Boolean(mapped?.[1] && unsafeV4(mapped[1]));
+};
 export async function assertSafeWebhookUrl(
   value: string,
   environment: 'sandbox' | 'production' | 'test',
@@ -26,10 +42,7 @@ export async function assertSafeWebhookUrl(
   for (const result of addresses) {
     if (
       (isIP(result.address) === 4 && unsafeV4(result.address)) ||
-      result.address === '::1' ||
-      result.address.startsWith('fe80:') ||
-      result.address.startsWith('fc') ||
-      result.address.startsWith('fd')
+      (isIP(result.address) === 6 && unsafeV6(result.address))
     )
       throw new Error('Unsafe webhook destination');
   }

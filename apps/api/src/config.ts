@@ -1,10 +1,15 @@
 import { z } from 'zod';
 const secret = z.string().min(16);
+const envBoolean = z.preprocess(
+  (value) => (value === 'true' ? true : value === 'false' ? false : value),
+  z.boolean(),
+);
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   RESTEC_ENV: z.enum(['sandbox', 'production', 'test']),
   RESTEC_REPOSITORY_DRIVER: z.enum(['memory', 'supabase']),
   RESTEC_PUBLIC_BASE_URL: z.string().url(),
+  RESTEC_DATABASE_URL: z.string().optional(),
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: secret.optional(),
   PAELY_PRIVATE_BASE_URL: z.string().url(),
@@ -16,13 +21,17 @@ const schema = z.object({
   RESTEC_SECRET_ENCRYPTION_KEY: z
     .string()
     .refine((v) => Buffer.from(v, 'base64').length === 32, 'Must be a base64-encoded 32-byte key'),
+  RESTEC_WEBHOOK_MASTER_KEY: secret.optional(),
   RESTEC_TIMESTAMP_TOLERANCE_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
   RESTEC_PRIVATE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(30000).default(5000),
   RESTEC_POS_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(500).max(30000).default(5000),
   RESTEC_MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
   RESTEC_DISPATCH_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
   RESTEC_INTERNAL_JOB_TOKEN: secret,
-  RESTEC_STRICT_RATE_LIMITING: z.coerce.boolean().default(false),
+  RESTEC_STRICT_RATE_LIMITING: envBoolean.default(false),
+  RESTEC_SHARED_RATE_LIMITER_URL: z.string().url().optional(),
+  RESTEC_SHARED_RATE_LIMITER_TOKEN: secret.optional(),
+  CRON_SECRET: secret.optional(),
 });
 export type Config = z.infer<typeof schema>;
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -37,6 +46,17 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     (!config.SUPABASE_URL || !config.SUPABASE_SERVICE_ROLE_KEY)
   )
     throw new Error('Supabase repository configuration is incomplete.');
+  if (config.RESTEC_ENV === 'production') {
+    if (!config.RESTEC_PUBLIC_BASE_URL.startsWith('https://'))
+      throw new Error('RESTEC_PUBLIC_BASE_URL must use HTTPS in production.');
+    if (!config.RESTEC_WEBHOOK_MASTER_KEY || !config.CRON_SECRET)
+      throw new Error('Production webhook and scheduler secrets are incomplete.');
+    if (
+      config.RESTEC_STRICT_RATE_LIMITING &&
+      (!config.RESTEC_SHARED_RATE_LIMITER_URL || !config.RESTEC_SHARED_RATE_LIMITER_TOKEN)
+    )
+      throw new Error('Strict production rate limiting requires a shared limiter.');
+  }
   return config;
 }
 export const sanitizedConfig = (c: Config) => ({

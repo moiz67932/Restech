@@ -13,6 +13,9 @@ const restricted = [
   /vercel project/i,
   /stack trace/i,
   /private[_ -]paely/i,
+  /paely_order_id/i,
+  /private (?:bill|table|connection) (?:id|reference)/i,
+  /postgres(?:ql)? function/i,
 ];
 const roots = [
   'apps/docs',
@@ -20,6 +23,8 @@ const roots = [
   'docs/openapi/restec-pos-public-api.yaml',
   'docs/samples',
   'docs/postman',
+  'docs/RESTEC_POS_INTEGRATION_GUIDE.md',
+  'docs/RESTEC_POS_CERTIFICATION_CHECKLIST.md',
 ];
 async function files(path: string): Promise<string[]> {
   const stat = await import('node:fs/promises').then((fs) => fs.stat(path));

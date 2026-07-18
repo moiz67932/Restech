@@ -2,13 +2,22 @@ openapi: 3.1.0
 info:
   title: Restec POS API
   version: 2026-07-01
-  description: Vendor-neutral restaurant bill and payment-status integration API. Money is expressed as integer minor units.
+  description: |
+    Public interface for restaurant POS bill synchronization, external payment reporting,
+    reconciliation, and signed payment-status webhooks. Money uses integer minor units.
+    Sign requests over `timestamp.METHOD.path.exact_raw_body`. Mutations are idempotent.
+    The sandbox and production credential sets are isolated.
 servers:
   - url: https://sandbox-api.restec.io
     description: Sandbox
   - url: https://api.restec.io
     description: Production
 security: [{ bearerAuth: [], requestSignature: [] }]
+tags:
+  - { name: Bills, description: Create, update, and reconcile bills. }
+  - { name: Payments, description: Report completed external payment facts. }
+  - { name: Tables, description: Retrieve authorized table mappings. }
+  - { name: Sandbox, description: Exercise the real event delivery pipeline in sandbox only. }
 paths:
   /health:
     get:
@@ -32,6 +41,7 @@ paths:
         { $ref: '#/components/parameters/RequestId' },
       ]
     put:
+      tags: [Bills]
       operationId: upsertBill
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
@@ -49,6 +59,7 @@ paths:
           '429': { $ref: '#/components/responses/Error' },
         }
     get:
+      tags: [Bills]
       operationId: getBill
       responses:
         {
@@ -67,6 +78,7 @@ paths:
         { $ref: '#/components/parameters/IdempotencyKey' },
       ]
     post:
+      tags: [Payments]
       operationId: recordExternalPayment
       requestBody:
         {
@@ -90,14 +102,50 @@ paths:
         { $ref: '#/components/parameters/RequestId' },
       ]
     get:
+      tags: [Tables]
       operationId: listTables
       responses:
         {
-          '200': { description: Public table mappings },
+          '200':
+            {
+              description: Public table mappings,
+              content:
+                {
+                  application/json:
+                    {
+                      schema:
+                        {
+                          type: object,
+                          required: [request_id, data],
+                          properties:
+                            {
+                              request_id: { type: string, pattern: '^req_' },
+                              data:
+                                {
+                                  type: array,
+                                  items:
+                                    {
+                                      type: object,
+                                      required: [table_id, external_table_id, name, active],
+                                      properties:
+                                        {
+                                          table_id: { type: string, pattern: '^tbl_' },
+                                          external_table_id: { type: string },
+                                          name: { type: string },
+                                          active: { type: boolean },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
           '401': { $ref: '#/components/responses/Error' },
         }
   /v1/test/scenarios:
     post:
+      tags: [Sandbox]
       operationId: createSandboxScenario
       parameters:
         [
@@ -117,10 +165,12 @@ paths:
                     {
                       type: object,
                       additionalProperties: false,
-                      required: [location_id, scenario],
+                      required: [external_bill_id, scenario],
                       properties:
                         {
                           location_id: { type: string, pattern: '^loc_' },
+                          external_bill_id: { type: string, minLength: 1, maxLength: 128 },
+                          amount: { type: integer, minimum: 1 },
                           scenario:
                             {
                               type: string,
@@ -147,7 +197,7 @@ paths:
         }
       responses:
         {
-          '202': { description: Scenario accepted },
+          '202': { description: Scenario accepted or replayed },
           '404': { description: Not available in production },
         }
 components:
@@ -340,6 +390,7 @@ components:
               },
           },
       }
+
   responses:
     Bill:
       {
@@ -351,3 +402,49 @@ components:
         description: Stable Restec error,
         content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } },
       }
+
+webhooks:
+  paymentStatusChanged:
+    post:
+      summary: Signed payment status event delivered to the POS webhook endpoint
+      description: |
+        Verify `X-Restec-Signature` over `timestamp.exact_raw_body`, durably store the
+        event ID with a unique constraint, and acknowledge with 200, 201, 202, or 204.
+        Close the invoice only when `payment_status` is `paid` and `amount_due` is zero.
+        Temporary failures are retried after 30 seconds, 2 minutes, 10 minutes, 30 minutes,
+        2 hours, 6 hours, and 12 hours. The public event ID stays unchanged.
+      parameters:
+        - {
+            name: X-Restec-Event-Id,
+            in: header,
+            required: true,
+            schema: { type: string, pattern: '^evt_' },
+          }
+        - { name: X-Restec-Timestamp, in: header, required: true, schema: { type: integer } }
+        - {
+            name: X-Restec-Signature,
+            in: header,
+            required: true,
+            schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' },
+          }
+        - {
+            name: X-Restec-Delivery-Attempt,
+            in: header,
+            required: true,
+            schema: { type: integer, minimum: 1 },
+          }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, type, schema_version, created_at, data]
+              properties:
+                id: { type: string, pattern: '^evt_' }
+                type: { type: string, enum: [payment.completed, payment.failed, payment.refunded] }
+                schema_version: { const: '2026-07-01' }
+                created_at: { type: string, format: date-time }
+                data: { type: object }
+      responses:
+        '202': { description: Durably accepted }

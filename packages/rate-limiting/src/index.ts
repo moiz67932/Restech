@@ -32,3 +32,29 @@ export class SharedRateLimiterRequired implements RateLimiter {
     throw new Error('A shared production rate-limiter adapter is required.');
   }
 }
+
+export class HttpSharedRateLimiter implements RateLimiter {
+  constructor(
+    private readonly url: string,
+    private readonly token: string,
+    private readonly fetcher: typeof fetch = fetch,
+  ) {}
+  async consume(input: RateLimitInput): Promise<RateLimitResult> {
+    const response = await this.fetcher(this.url, {
+      method: 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(2000),
+      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error('Shared rate limiter unavailable');
+    const value = (await response.json()) as Partial<RateLimitResult>;
+    if (
+      typeof value.allowed !== 'boolean' ||
+      !Number.isInteger(value.remaining) ||
+      !Number.isInteger(value.retryAfterSeconds)
+    )
+      throw new Error('Shared rate limiter returned an invalid response');
+    return value as RateLimitResult;
+  }
+}

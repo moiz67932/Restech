@@ -15,7 +15,7 @@ export default function Portal() {
     <main style={{ display: 'grid', gridTemplateColumns: '240px 1fr', minHeight: '100vh' }}>
       <aside style={{ padding: 24, background: '#10251f', color: 'white' }}>
         <h2>Restec Portal</h2>
-        <p>Signed in as Developer</p>
+        <p>Admin access not configured</p>
         {screens.map((s) => (
           <button
             key={s}
@@ -36,7 +36,15 @@ export default function Portal() {
         <p>Manage integrations, credentials, delivery health, and sandbox tests.</p>
         <div>
           <h2>API Keys</h2>
-          <button>Create key</button> <button>Rotate</button> <button>Revoke</button>
+          <button disabled title="Requires the protected admin service">
+            Create key
+          </button>{' '}
+          <button disabled title="Requires the protected admin service">
+            Rotate
+          </button>{' '}
+          <button disabled title="Requires the protected admin service">
+            Revoke
+          </button>
           <p>New secrets are displayed once. Stored secrets cannot be viewed again.</p>
         </div>
         <div>
@@ -46,14 +54,15 @@ export default function Portal() {
             placeholder="https://partner.example/webhooks/restec"
             style={{ width: 420 }}
           />{' '}
-          <button>Save</button> <button>Send test event</button>
+          <button disabled>Save</button> <button disabled>Send sandbox test event</button>
         </div>
         <div>
           <h2>Sandbox Simulator</h2>
-          <button>Partial payment</button> <button>Full payment</button> <button>Failure</button>{' '}
-          <button>Refund</button> <button>Duplicate webhook</button>{' '}
-          <button>Delayed webhook</button> <button>POS timeout</button>{' '}
-          <button>Out-of-order event</button>
+          <p>Controls remain disabled until authenticated sandbox admin wiring is configured.</p>
+          <button disabled>Partial payment</button> <button disabled>Full payment</button>{' '}
+          <button disabled>Failure</button> <button disabled>Refund</button>{' '}
+          <button disabled>Duplicate webhook</button> <button disabled>Delayed webhook</button>{' '}
+          <button disabled>POS timeout</button> <button disabled>Out-of-order event</button>
         </div>
       </section>
     </main>

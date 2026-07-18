@@ -33,7 +33,7 @@ test('health exposes only safe fields', async () => {
     internalJobToken: 'job',
   });
   const response = await app.request('/health');
-  assert.deepEqual(await response.json(), { status: 'ok', environment: 'test', version: '0.1.0' });
+  assert.deepEqual(await response.json(), { status: 'ok', environment: 'test', version: '1.0.0' });
 });
 test('private event is durably deduplicated before response', async () => {
   const repo = new MemoryRepository();
@@ -89,6 +89,7 @@ test('private event is durably deduplicated before response', async () => {
     'X-Paely-Event-Id': 'private-event-1',
     'X-Paely-Timestamp': String(timestamp),
     'X-Paely-Signature': signEvent('secret', timestamp, body),
+    'X-Paely-Delivery-Attempt': '1',
   };
   const first = await app.request('/api/internal/events/paely/v1', {
     method: 'POST',

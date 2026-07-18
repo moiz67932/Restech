@@ -130,10 +130,22 @@ export class PaelyClient {
     return this.sanitizeBill(data);
   }
   private sanitizeBill(data: PrivateBillState): PublicBillState {
-    const safe = { ...data } as Partial<PrivateBillState>;
-    delete safe.integration_bill_id;
-    delete safe.paely_order_id;
-    return safe as PublicBillState;
+    return {
+      external_bill_id: data.external_bill_id,
+      external_table_id: data.external_table_id,
+      sync_status: data.sync_status,
+      order_status: data.order_status,
+      payment_status: data.payment_status,
+      table_session_status: data.table_session_status,
+      currency: data.currency,
+      grand_total: data.grand_total,
+      amount_paid: data.amount_paid,
+      amount_refunded: data.amount_refunded,
+      amount_due: data.amount_due,
+      version: data.version,
+      reconciliation_status: data.reconciliation_status,
+      updated_at: data.updated_at,
+    };
   }
   private async rawRequest(
     method: string,

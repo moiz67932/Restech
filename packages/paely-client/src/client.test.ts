@@ -13,6 +13,8 @@ test('private client signs exact body, preserves idempotency key, rotates reques
       JSON.stringify({
         integration_bill_id: 'int_bill_private',
         paely_order_id: '00000000-0000-0000-0000-000000000000',
+        private_table_uuid: '00000000-0000-0000-0000-000000000999',
+        upstream_debug: { route: '/hidden' },
         external_bill_id: 'B1',
         external_table_id: 'T1',
         sync_status: 'accepted',
@@ -80,4 +82,6 @@ test('private client signs exact body, preserves idempotency key, rotates reques
   );
   assert(!('integration_bill_id' in result));
   assert(!('paely_order_id' in result));
+  assert(!('private_table_uuid' in result));
+  assert(!('upstream_debug' in result));
 });

@@ -1,26 +1,121 @@
 {
   "info": {
     "name": "Restec Sandbox API",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Signed Restec POS sandbox requests. Never store real secrets in the collection."
   },
   "variable": [
-    { "key": "baseUrl", "value": "https://sandbox-api.restec.io" },
-    { "key": "apiKey", "value": "rst_test_example" },
-    { "key": "locationId", "value": "loc_example" }
+    { "key": "base_url", "value": "https://sandbox-api.restec.io" },
+    { "key": "api_key", "value": "rst_test_replace" },
+    { "key": "request_signing_secret", "value": "replace" },
+    { "key": "webhook_signing_secret", "value": "replace" },
+    { "key": "location_id", "value": "loc_example" },
+    { "key": "external_bill_id", "value": "INV-1001" }
   ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const timestamp = Math.floor(Date.now()/1000).toString();",
+          "const requestId = 'req_' + pm.variables.replaceIn('{{$guid}}').replaceAll('-', '');",
+          "const path = '/' + pm.request.url.path.join('/');",
+          "const rawBody = pm.request.body && pm.request.body.mode === 'raw' ? pm.variables.replaceIn(pm.request.body.raw) : '';",
+          "const input = timestamp + '.' + pm.request.method.toUpperCase() + '.' + path + '.' + rawBody;",
+          "const signature = CryptoJS.HmacSHA256(input, pm.collectionVariables.get('request_signing_secret')).toString(CryptoJS.enc.Hex);",
+          "pm.variables.set('timestamp', timestamp); pm.variables.set('request_id', requestId); pm.variables.set('signature', 'v1=' + signature);"
+        ]
+      }
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{api_key}}", "type": "string" }]
+  },
   "item": [
-    { "name": "Health", "request": { "method": "GET", "url": "{{baseUrl}}/health" } },
+    {
+      "name": "Health",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/health" }
+    },
+    {
+      "name": "Create or update bill",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "bill-{{external_bill_id}}-v1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_table_id\":\"12\",\"version\":1,\"currency\":\"PKR\",\"status\":\"open\",\"order_status\":\"accepted\",\"items\":[{\"external_item_id\":\"I1\",\"name\":\"Meal\",\"quantity\":1,\"unit_amount\":10000,\"total_amount\":10000}],\"totals\":{\"subtotal\":10000,\"tax\":0,\"service_charge\":0,\"discount\":0,\"tip\":0,\"grand_total\":10000},\"occurred_at\":\"2026-07-18T10:30:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}"
+      }
+    },
+    {
+      "name": "Retrieve bill",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" }
+        ],
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}"
+      }
+    },
+    {
+      "name": "Record external payment",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-POSPAY-1001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"POSPAY-1001\",\"method\":\"card_terminal\",\"amount\":10000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-07-18T10:45:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments"
+      }
+    },
     {
       "name": "List tables",
       "request": {
         "method": "GET",
         "header": [
-          { "key": "Authorization", "value": "Bearer {{apiKey}}" },
+          { "key": "Content-Type", "value": "application/json" },
           { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
           { "key": "X-Restec-Signature", "value": "{{signature}}" },
-          { "key": "X-Request-Id", "value": "{{requestId}}" }
+          { "key": "X-Request-Id", "value": "{{request_id}}" }
         ],
-        "url": "{{baseUrl}}/v1/locations/{{locationId}}/tables"
+        "url": "{{base_url}}/v1/locations/{{location_id}}/tables"
+      }
+    },
+    {
+      "name": "Sandbox payment completed",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "scenario-payment-completed-{{external_bill_id}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"scenario\":\"payment.completed\",\"external_bill_id\":\"{{external_bill_id}}\",\"amount\":10000}"
+        },
+        "url": "{{base_url}}/v1/test/scenarios"
       }
     }
   ]

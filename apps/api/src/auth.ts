@@ -17,21 +17,42 @@ export const publicAuth =
     const auth = c.req.header('Authorization') ?? '';
     const timestamp = Number(c.req.header('X-Restec-Timestamp'));
     const signature = c.req.header('X-Restec-Signature') ?? '';
-    if (!requestId.startsWith('req_'))
+    if (!/^req_[A-Za-z0-9._:-]{4,123}$/.test(requestId))
       throw new ApiError(400, 'invalid_request', 'A valid request ID is required.');
+    if (config.RESTEC_STRICT_RATE_LIMITING && !rateLimiter)
+      throw new ApiError(503, 'dependency_unavailable', 'Request limiting is not configured.');
     const apiKey = auth.startsWith('Bearer ') ? auth.slice(7) : '';
     const targetEnvironment = config.RESTEC_ENV === 'production' ? 'production' : 'sandbox';
     const credential = await repo.authenticateApiKey(apiKey, targetEnvironment);
-    if (!credential || (credential.expiresAt && credential.expiresAt <= new Date()))
+    if (!credential || (credential.expiresAt && credential.expiresAt <= new Date())) {
+      if (rateLimiter) {
+        const source =
+          c.req.header('CF-Connecting-IP') ??
+          c.req.header('X-Forwarded-For')?.split(',')[0] ??
+          'unknown';
+        try {
+          await rateLimiter.consume({
+            key: `auth-failure:${sha256(source)}`,
+            limit: 20,
+            windowSeconds: 60,
+          });
+        } catch {
+          throw new ApiError(503, 'dependency_unavailable', 'Request limiting is unavailable.');
+        }
+      }
       throw new ApiError(401, 'invalid_credentials', 'The supplied credentials are invalid.');
-    if (config.RESTEC_STRICT_RATE_LIMITING && !rateLimiter)
-      throw new ApiError(503, 'dependency_unavailable', 'Request limiting is not configured.');
+    }
     if (rateLimiter) {
-      const limited = await rateLimiter.consume({
-        key: `partner:${credential.partnerId}`,
-        limit: 100,
-        windowSeconds: 60,
-      });
+      let limited;
+      try {
+        limited = await rateLimiter.consume({
+          key: `partner:${credential.partnerId}:path:${new URL(c.req.url).pathname}`,
+          limit: 100,
+          windowSeconds: 60,
+        });
+      } catch {
+        throw new ApiError(503, 'dependency_unavailable', 'Request limiting is unavailable.');
+      }
       if (!limited.allowed) {
         c.header('Retry-After', String(limited.retryAfterSeconds));
         throw new ApiError(429, 'rate_limited', 'The request rate limit was exceeded.');
@@ -44,6 +65,8 @@ export const publicAuth =
     )
       throw new ApiError(401, 'invalid_credentials', 'The supplied credentials are invalid.');
     const rawBody = new Uint8Array(await c.req.raw.clone().arrayBuffer());
+    if (c.req.header('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
+      throw new ApiError(400, 'invalid_request', 'Content-Type must be application/json.');
     if (rawBody.byteLength > 1_048_576)
       throw new ApiError(413, 'payload_too_large', 'The request payload is too large.');
     if (

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { decryptSecret, hashApiKey, secureEqual, sha256 } from '@restec/security';
+import { RepositoryError } from './repository.js';
 import type {
   AuditInput,
   AuthorizedLocation,
@@ -12,7 +13,11 @@ import type {
   PrivateEventInput,
   RestecRepository,
 } from './repository.js';
-import type { CanonicalBillInput, CanonicalExternalPaymentInput } from '@restec/contracts';
+import {
+  eventSchema,
+  type CanonicalBillInput,
+  type CanonicalExternalPaymentInput,
+} from '@restec/contracts';
 
 export interface SupabaseRepositoryConfig {
   apiKeyHashSecret: string;
@@ -22,8 +27,21 @@ const apiKeyParts = (key: string) => {
   const match = /^rst_(?:test|live)_([a-f0-9]{12})[A-Za-z0-9_-]+$/.exec(key);
   return match?.[1] ?? null;
 };
+const publicRepositoryCodes = new Set([
+  'resource_not_found',
+  'replay_detected',
+  'idempotency_conflict',
+  'bill_version_conflict',
+  'payment_in_progress',
+  'bill_already_paid',
+  'amount_mismatch',
+]);
 const dbError = (error: { message: string } | null) => {
-  if (error) throw new Error('Database operation failed');
+  if (error) {
+    const code = [...publicRepositoryCodes].find((value) => error.message.includes(value));
+    if (code) throw new RepositoryError(code as any);
+    throw new Error('Database operation failed');
+  }
 };
 export class SupabaseRepository implements RestecRepository {
   constructor(
@@ -215,7 +233,7 @@ export class SupabaseRepository implements RestecRepository {
       .order('external_table_id');
     dbError(error);
     return (data ?? []).map((v: any) => ({
-      restec_table_id: v.restec_table_id,
+      table_id: v.restec_table_id,
       external_table_id: v.external_table_id,
       name: (Array.isArray(v.pos_tables) ? v.pos_tables[0] : v.pos_tables).name,
       active: v.active,
@@ -225,6 +243,32 @@ export class SupabaseRepository implements RestecRepository {
     const rows = await this.listTables(connectionId);
     const row = rows.find((v) => v.external_table_id === externalTableId);
     return row ? { ...row, connection_id: connectionId } : null;
+  }
+  async validateBillMutation(
+    connectionId: string,
+    externalBillId: string,
+    version: number,
+    requestHash: string,
+  ) {
+    const { data, error } = await this.db
+      .from('bill_mappings')
+      .select('current_version,last_request_hash,public_state')
+      .eq('connection_id', connectionId)
+      .eq('external_bill_id', externalBillId)
+      .maybeSingle();
+    dbError(error);
+    if (!data) {
+      if (version !== 1) throw new RepositoryError('bill_version_conflict');
+      return { kind: 'proceed' } as const;
+    }
+    if (
+      version < data.current_version ||
+      (version === data.current_version && requestHash !== data.last_request_hash)
+    )
+      throw new RepositoryError('bill_version_conflict');
+    if (version === data.current_version)
+      return { kind: 'replay', state: data.public_state as CanonicalBillState } as const;
+    return { kind: 'proceed' } as const;
   }
   async saveBillState(
     connectionId: string,
@@ -255,6 +299,43 @@ export class SupabaseRepository implements RestecRepository {
       .maybeSingle();
     dbError(error);
     return (data?.public_state as CanonicalBillState) ?? null;
+  }
+  async validateExternalPayment(
+    connectionId: string,
+    externalBillId: string,
+    input: CanonicalExternalPaymentInput,
+    requestHash: string,
+  ) {
+    const { data: bill, error } = await this.db
+      .from('bill_mappings')
+      .select('id,public_state')
+      .eq('connection_id', connectionId)
+      .eq('external_bill_id', externalBillId)
+      .maybeSingle();
+    dbError(error);
+    if (!bill) throw new RepositoryError('resource_not_found');
+    const { data: payment, error: paymentError } = await this.db
+      .from('external_payments')
+      .select('bill_mapping_id,request_hash,public_state')
+      .eq('connection_id', connectionId)
+      .eq('external_payment_id', input.external_payment_id)
+      .maybeSingle();
+    dbError(paymentError);
+    if (payment) {
+      if (payment.bill_mapping_id !== bill.id || payment.request_hash !== requestHash)
+        throw new RepositoryError('idempotency_conflict');
+      return {
+        kind: 'replay',
+        state: (payment.public_state ?? bill.public_state) as CanonicalBillState,
+      } as const;
+    }
+    const state = bill.public_state as CanonicalBillState;
+    if (state.currency !== input.currency) throw new RepositoryError('amount_mismatch');
+    if (state.payment_status === 'payment_in_progress')
+      throw new RepositoryError('payment_in_progress');
+    if (state.amount_due === 0 || input.amount > state.amount_due)
+      throw new RepositoryError('bill_already_paid');
+    return { kind: 'proceed' } as const;
   }
   async saveExternalPayment(
     connectionId: string,
@@ -292,7 +373,7 @@ export class SupabaseRepository implements RestecRepository {
     const row = data?.[0];
     return {
       eventId: row?.event_id ?? input.publicEventId,
-      duplicate: row?.event_id !== input.publicEventId,
+      duplicate: row?.accepted === false,
     };
   }
   async getConnectionForPrivateEvent(privateConnectionId: string) {
@@ -307,6 +388,26 @@ export class SupabaseRepository implements RestecRepository {
       ? this.authorizeLocation(data.location_id, data.partner_id, data.environment)
       : null;
   }
+  async findSandboxConnection(partnerId: string, externalBillId: string) {
+    const { data: bill } = await this.db
+      .from('bill_mappings')
+      .select('connection_id,pos_connections!inner(partner_id,environment)')
+      .eq('external_bill_id', externalBillId)
+      .eq('pos_connections.partner_id', partnerId)
+      .eq('pos_connections.environment', 'sandbox')
+      .limit(1)
+      .maybeSingle();
+    if (bill) return this.authorizeConnection(bill.connection_id);
+    const { data, error } = await this.db
+      .from('pos_connections')
+      .select('id')
+      .eq('partner_id', partnerId)
+      .eq('environment', 'sandbox')
+      .eq('status', 'active')
+      .limit(2);
+    dbError(error);
+    return data?.length === 1 ? this.authorizeConnection(data[0]!.id) : null;
+  }
   async claimPosOutboxEvents(
     limit: number,
     leaseSeconds: number,
@@ -319,7 +420,15 @@ export class SupabaseRepository implements RestecRepository {
     const result: ClaimedPosOutboxEvent[] = [];
     for (const row of data ?? []) {
       const connection = await this.authorizeConnection(row.connection_id);
-      if (connection)
+      if (connection) {
+        const { data: sandbox } = await this.db
+          .from('sandbox_scenarios')
+          .select('scenario')
+          .eq('public_event_id', row.public_event_id)
+          .maybeSingle();
+        const failureMode = sandbox?.scenario?.startsWith('webhook_')
+          ? sandbox.scenario.replace('webhook_', '')
+          : undefined;
         result.push({
           id: row.id,
           publicEventId: row.public_event_id,
@@ -328,11 +437,14 @@ export class SupabaseRepository implements RestecRepository {
           schemaVersion: row.schema_version,
           payload: row.payload,
           attemptCount: row.attempt_count,
-          configuration: connection.configuration,
-          connectorType: connection.connectorType,
-          connectorVersion: connection.connectorVersion,
+          configuration: failureMode
+            ? { ...connection.configuration, failure_mode: failureMode }
+            : connection.configuration,
+          connectorType: failureMode ? 'mock_pos' : connection.connectorType,
+          connectorVersion: failureMode ? '1.0.0' : connection.connectorVersion,
           connectorEnabled: connection.connectorEnabled,
         });
+      }
     }
     return result;
   }
@@ -362,6 +474,27 @@ export class SupabaseRepository implements RestecRepository {
       .update({ attempt_count: input.attemptNumber })
       .eq('id', input.eventId);
     dbError(updateError);
+  }
+  async completeOutboxDelivery(input: DeliveryAttempt & { responseStatus: number }) {
+    const { error } = await this.db.rpc('complete_pos_outbox_delivery', {
+      p_event_id: input.eventId,
+      p_attempt: input.attemptNumber,
+      p_status: input.responseStatus,
+      p_duration: input.durationMs,
+    });
+    dbError(error);
+  }
+  async failOutboxDelivery(input: DeliveryAttempt & { nextAttemptAt?: Date; errorCode: string }) {
+    const { error } = await this.db.rpc('fail_pos_outbox_delivery', {
+      p_event_id: input.eventId,
+      p_attempt: input.attemptNumber,
+      p_status: input.responseStatus ?? null,
+      p_outcome: input.outcome,
+      p_error: input.errorCode,
+      p_duration: input.durationMs,
+      p_next: input.nextAttemptAt?.toISOString() ?? null,
+    });
+    dbError(error);
   }
   async markOutboxDelivered(eventId: string) {
     const { error } = await this.db
@@ -409,33 +542,66 @@ export class SupabaseRepository implements RestecRepository {
     const { error } = await this.db.rpc('replay_pos_outbox_event', { p_event_id: eventId });
     dbError(error);
   }
-  async createSandboxEvent(connectionId: string, scenario: string) {
+  async createSandboxEvent(
+    connectionId: string,
+    scenario: string,
+    externalBillId: string,
+    amount?: number,
+  ) {
     const eventId = `evt_${randomUUID().replaceAll('-', '')}`;
     const connection = await this.authorizeConnection(connectionId);
     if (!connection || connection.environment !== 'sandbox')
       throw new Error('Sandbox connection not found');
     const privateEventId = `sandbox_${randomUUID().replaceAll('-', '')}`;
+    const bill = await this.getBill(connectionId, externalBillId);
+    if (!bill) throw new RepositoryError('resource_not_found');
+    if (scenario === 'amount_mismatch') throw new RepositoryError('amount_mismatch');
+    if (scenario === 'bill_already_paid') throw new RepositoryError('bill_already_paid');
     const type =
-      scenario === 'payment.completed' ||
-      scenario === 'payment.refunded' ||
-      scenario === 'payment.failed'
-        ? scenario
-        : scenario === 'partial_payment.completed'
-          ? 'payment.completed'
-          : 'payment.failed';
-    const payload = {
+      scenario === 'payment.refunded'
+        ? 'payment.refunded'
+        : scenario === 'payment.failed'
+          ? 'payment.failed'
+          : 'payment.completed';
+    const grandTotal = bill.grand_total;
+    const currentPaid =
+      type === 'payment.refunded' && bill.amount_paid === 0 ? grandTotal : bill.amount_paid;
+    const paid =
+      amount ??
+      (scenario === 'partial_payment.completed'
+        ? Math.max(1, Math.floor(bill.amount_due / 2))
+        : type === 'payment.refunded'
+          ? Math.max(1, currentPaid - bill.amount_refunded)
+          : bill.amount_due);
+    if (
+      (type === 'payment.completed' && paid > bill.amount_due) ||
+      (type === 'payment.refunded' && paid > currentPaid - bill.amount_refunded)
+    )
+      throw new RepositoryError('amount_mismatch');
+    if (type === 'payment.completed' && bill.amount_due === 0)
+      throw new RepositoryError('bill_already_paid');
+    const nextPaid =
+      type === 'payment.completed' ? Math.min(grandTotal, currentPaid + paid) : currentPaid;
+    const nextRefunded =
+      type === 'payment.refunded'
+        ? Math.min(nextPaid, bill.amount_refunded + paid)
+        : bill.amount_refunded;
+    const nextDue = Math.max(0, grandTotal - nextPaid + nextRefunded);
+    const payload = eventSchema.parse({
       id: eventId,
       type,
       schema_version: '2026-07-01',
-      created_at: new Date().toISOString(),
+      created_at: new Date(
+        Date.now() - (scenario === 'out_of_order_event' ? 60_000 : 0),
+      ).toISOString(),
       data: {
         location_id: connection.locationId,
-        external_bill_id: `SANDBOX-${scenario}`,
-        external_table_id: 'EXT-01',
+        external_bill_id: externalBillId,
+        external_table_id: bill.external_table_id,
         payment: {
           restec_payment_id: `pay_${sha256(eventId).slice(0, 20)}`,
-          amount: scenario === 'partial_payment.completed' ? 500 : 1000,
-          currency: 'PKR',
+          amount: paid,
+          currency: bill.currency,
           method: 'card',
           status:
             type === 'payment.failed'
@@ -445,32 +611,24 @@ export class SupabaseRepository implements RestecRepository {
                 : 'completed',
         },
         bill: {
-          grand_total: 1000,
-          amount_paid:
-            type === 'payment.completed'
-              ? scenario === 'partial_payment.completed'
-                ? 500
-                : 1000
-              : 0,
-          amount_refunded: type === 'payment.refunded' ? 1000 : 0,
-          amount_due:
-            type === 'payment.completed'
-              ? scenario === 'partial_payment.completed'
-                ? 500
-                : 0
-              : 1000,
+          grand_total: grandTotal,
+          amount_paid: nextPaid,
+          amount_refunded: nextRefunded,
+          amount_due: nextDue,
           payment_status:
             type === 'payment.completed'
-              ? scenario === 'partial_payment.completed'
+              ? nextDue > 0
                 ? 'partially_paid'
                 : 'paid'
               : type === 'payment.refunded'
-                ? 'refunded'
+                ? nextRefunded === nextPaid
+                  ? 'refunded'
+                  : 'partially_refunded'
                 : 'failed',
-          version: 1,
+          version: bill.version,
         },
       },
-    };
+    });
     const accepted = {
       privateEventId,
       eventType: type,
@@ -492,6 +650,22 @@ export class SupabaseRepository implements RestecRepository {
       targetId: eventId,
       metadata: { scenario },
     });
+    const { error: scenarioError } = await this.db.from('sandbox_scenarios').insert({
+      connection_id: connectionId,
+      scenario,
+      external_bill_id: externalBillId,
+      requested_amount: amount,
+      public_event_id: eventId,
+      status: 'accepted',
+    });
+    dbError(scenarioError);
+    if (scenario === 'delayed_event') {
+      const { error: delayError } = await this.db
+        .from('pos_outbox_events')
+        .update({ next_attempt_at: new Date(Date.now() + 30_000).toISOString() })
+        .eq('public_event_id', eventId);
+      dbError(delayError);
+    }
     return { eventId };
   }
   async createAuditLog(input: AuditInput) {

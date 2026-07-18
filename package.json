@@ -9,6 +9,7 @@
     "packages/connectors/*"
   ],
   "scripts": {
+    "dev": "npm run dev --workspace @restec/api",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "tsc -b",
     "lint": "eslint .",
@@ -17,6 +18,7 @@
     "test": "node --import tsx --test \"packages/**/*.test.ts\" \"apps/**/*.test.ts\"",
     "test:leakage": "node --import tsx scripts/check-public-content.ts",
     "validate:openapi": "node --import tsx scripts/validate-openapi.ts",
+    "validate:public-artifacts": "node --import tsx scripts/validate-public-artifacts.ts",
     "check:migrations": "node --import tsx scripts/check-migrations.ts",
     "create:connector": "node --import tsx scripts/create-connector.ts",
     "db:start": "supabase start",
@@ -26,19 +28,25 @@
     "db:types": "supabase gen types typescript --local --schema public > packages/database/src/database.types.ts",
     "test:database": "node --import tsx --test packages/database/src/*.integration.test.ts",
     "test:e2e:sandbox": "node --import tsx --test apps/api/src/*.e2e.test.ts",
+    "test:integration": "node --import tsx --test packages/paely-client/src/mock-server.test.ts apps/api/src/mock.e2e.test.ts",
+    "test:e2e:mock": "node --import tsx --test apps/api/src/mock.e2e.test.ts packages/connectors/canonical-rest/src/mock-pos-server.test.ts packages/paely-client/src/mock-server.test.ts",
+    "test:remote-sandbox": "node --import tsx --test apps/api/src/sandbox.e2e.test.ts packages/database/src/supabase-repository.integration.test.ts",
     "create:sandbox-credentials": "node --import tsx scripts/create-sandbox-credentials.ts",
     "certify:paely-sandbox": "node --import tsx scripts/certify-paely-sandbox.ts",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run validate:openapi && npm run test:leakage && npm run check:migrations && npm run build"
+    "create:demo-bill": "node --import tsx scripts/sandbox-operation.ts create-bill",
+    "dispatch:pos-events": "node --import tsx scripts/sandbox-operation.ts dispatch",
+    "reconcile:sandbox": "node --import tsx scripts/sandbox-operation.ts reconcile",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:e2e:mock && npm run validate:openapi && npm run validate:public-artifacts && npm run test:leakage && npm run check:migrations && npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
+    "supabase": "^2.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.0.0",
-    "yaml": "^2.6.0",
-    "supabase": "^2.0.0"
+    "yaml": "^2.6.0"
   }
 }

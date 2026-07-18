@@ -5,6 +5,19 @@ import type {
 } from '@restec/contracts';
 
 export type Environment = 'sandbox' | 'production';
+export type RepositoryErrorCode =
+  | 'resource_not_found'
+  | 'replay_detected'
+  | 'idempotency_conflict'
+  | 'bill_version_conflict'
+  | 'payment_in_progress'
+  | 'bill_already_paid'
+  | 'amount_mismatch';
+export class RepositoryError extends Error {
+  constructor(public readonly code: RepositoryErrorCode) {
+    super(code);
+  }
+}
 export interface AuthenticatedPartner {
   partnerId: string;
   environment: Environment;
@@ -26,7 +39,7 @@ export interface AuthorizedLocation {
   configuration: Record<string, unknown>;
 }
 export interface PublicTable {
-  restec_table_id: string;
+  table_id: string;
   external_table_id: string;
   name: string;
   active: boolean;
@@ -135,6 +148,12 @@ export interface RestecRepository {
   ): Promise<AuthorizedLocation | null>;
   listTables(connectionId: string): Promise<PublicTable[]>;
   getTableMapping(connectionId: string, externalTableId: string): Promise<TableMapping | null>;
+  validateBillMutation(
+    connectionId: string,
+    externalBillId: string,
+    version: number,
+    requestHash: string,
+  ): Promise<{ kind: 'proceed' } | { kind: 'replay'; state: CanonicalBillState }>;
   saveBillState(
     connectionId: string,
     externalBillId: string,
@@ -144,6 +163,12 @@ export interface RestecRepository {
     privateReference: string,
   ): Promise<CanonicalBillState>;
   getBill(connectionId: string, externalBillId: string): Promise<CanonicalBillState | null>;
+  validateExternalPayment(
+    connectionId: string,
+    externalBillId: string,
+    input: CanonicalExternalPaymentInput,
+    requestHash: string,
+  ): Promise<{ kind: 'proceed' } | { kind: 'replay'; state: CanonicalBillState }>;
   saveExternalPayment(
     connectionId: string,
     externalBillId: string,
@@ -153,13 +178,26 @@ export interface RestecRepository {
   ): Promise<CanonicalBillState>;
   acceptPrivateEvent(input: PrivateEventInput): Promise<{ eventId: string; duplicate: boolean }>;
   getConnectionForPrivateEvent(privateConnectionId: string): Promise<AuthorizedLocation | null>;
+  findSandboxConnection(
+    partnerId: string,
+    externalBillId: string,
+  ): Promise<AuthorizedLocation | null>;
   claimPosOutboxEvents(limit: number, leaseSeconds: number): Promise<ClaimedPosOutboxEvent[]>;
   recordDeliveryAttempt(input: DeliveryAttempt): Promise<void>;
+  completeOutboxDelivery(input: DeliveryAttempt & { responseStatus: number }): Promise<void>;
+  failOutboxDelivery(
+    input: DeliveryAttempt & { nextAttemptAt?: Date; errorCode: string },
+  ): Promise<void>;
   markOutboxDelivered(eventId: string): Promise<void>;
   scheduleOutboxRetry(eventId: string, nextAttemptAt: Date, errorCode: string): Promise<void>;
   markOutboxDeadLetter(eventId: string, errorCode: string): Promise<void>;
   releaseExpiredLeases(): Promise<number>;
   replayOutboxEvent(eventId: string): Promise<void>;
-  createSandboxEvent(connectionId: string, scenario: string): Promise<{ eventId: string }>;
+  createSandboxEvent(
+    connectionId: string,
+    scenario: string,
+    externalBillId: string,
+    amount?: number,
+  ): Promise<{ eventId: string }>;
   createAuditLog(input: AuditInput): Promise<void>;
 }

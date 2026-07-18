@@ -1,4 +1,4 @@
-name: Phase 2 verification
+name: Restec integration verification
 on: [push, pull_request]
 jobs:
   verify:
