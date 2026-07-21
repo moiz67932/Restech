@@ -14,8 +14,11 @@ export type RepositoryErrorCode =
   | 'bill_already_paid'
   | 'amount_mismatch';
 export class RepositoryError extends Error {
-  constructor(public readonly code: RepositoryErrorCode) {
+  public readonly code: RepositoryErrorCode;
+
+  constructor(code: RepositoryErrorCode) {
     super(code);
+    this.code = code;
   }
 }
 export interface AuthenticatedPartner {

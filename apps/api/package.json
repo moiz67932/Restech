@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -b tsconfig.json"
+    "build": "tsc -b --force tsconfig.json && node ../../scripts/verify-vercel-runtime.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -20,7 +23,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "typescript": "^5.7.0"
   }
 }

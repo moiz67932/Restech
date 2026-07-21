@@ -6,12 +6,19 @@ export type {
   RestecRepository as Repository,
 } from '@restec/database';
 export class ApiError extends Error {
+  public status: number;
+  public code: PublicErrorCode;
+  public details: Record<string, unknown>;
+
   constructor(
-    public status: number,
-    public code: PublicErrorCode,
+    status: number,
+    code: PublicErrorCode,
     message: string,
-    public details: Record<string, unknown> = {},
+    details: Record<string, unknown> = {},
   ) {
     super(message);
+    this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }

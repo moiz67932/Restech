@@ -3,18 +3,24 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "workspaces": [
     "apps/*",
     "packages/*",
     "packages/connectors/*"
   ],
   "scripts": {
+    "predev": "npm run build:api",
     "dev": "npm run dev --workspace @restec/api",
     "build": "npm run build --workspaces --if-present",
+    "build:api": "tsc -b --force apps/api/tsconfig.json",
     "typecheck": "tsc -b",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "pretest": "npm run build:api",
     "test": "node --import tsx --test \"packages/**/*.test.ts\" \"apps/**/*.test.ts\"",
     "test:leakage": "node --import tsx scripts/check-public-content.ts",
     "validate:openapi": "node --import tsx scripts/validate-openapi.ts",
@@ -31,16 +37,18 @@
     "test:integration": "node --import tsx --test packages/paely-client/src/mock-server.test.ts apps/api/src/mock.e2e.test.ts",
     "test:e2e:mock": "node --import tsx --test apps/api/src/mock.e2e.test.ts packages/connectors/canonical-rest/src/mock-pos-server.test.ts packages/paely-client/src/mock-server.test.ts",
     "test:remote-sandbox": "node --import tsx --test apps/api/src/sandbox.e2e.test.ts packages/database/src/supabase-repository.integration.test.ts",
-    "create:sandbox-credentials": "node --import tsx scripts/create-sandbox-credentials.ts",
+    "create:sandbox-credentials": "node --env-file-if-exists=.env --import tsx scripts/create-sandbox-credentials.ts",
     "certify:paely-sandbox": "node --import tsx scripts/certify-paely-sandbox.ts",
     "create:demo-bill": "node --import tsx scripts/sandbox-operation.ts create-bill",
     "dispatch:pos-events": "node --import tsx scripts/sandbox-operation.ts dispatch",
     "reconcile:sandbox": "node --import tsx scripts/sandbox-operation.ts reconcile",
+    "verify:erasable-syntax": "tsc -p tsconfig.erasable.json",
+    "verify:vercel-runtime": "node scripts/verify-vercel-runtime.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:e2e:mock && npm run validate:openapi && npm run validate:public-artifacts && npm run test:leakage && npm run check:migrations && npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
     "supabase": "^2.0.0",

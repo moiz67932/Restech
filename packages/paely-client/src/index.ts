@@ -46,17 +46,22 @@ export interface PublicBillState {
   updated_at: string;
 }
 export class PrivateDependencyError extends Error {
-  constructor(
-    public readonly retryable: boolean,
-    public readonly status: number,
-  ) {
+  public readonly retryable: boolean;
+  public readonly status: number;
+
+  constructor(retryable: boolean, status: number) {
     super('Private dependency request failed');
+    this.retryable = retryable;
+    this.status = status;
   }
 }
 const retryable = new Set([408, 425, 429, 500, 502, 503, 504]);
 export class PaelyClient {
+  private readonly config: PrivateClientConfig;
   private readonly fetcher: typeof fetch;
-  constructor(private readonly config: PrivateClientConfig) {
+
+  constructor(config: PrivateClientConfig) {
+    this.config = config;
     this.fetcher = config.fetch ?? fetch;
   }
   async upsertBill(

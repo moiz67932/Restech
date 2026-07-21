@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true
+  },
+  "include": ["apps/api/**/*.ts", "packages/**/*.ts"],
+  "exclude": ["apps/api/dist", "packages/**/dist"]
+}

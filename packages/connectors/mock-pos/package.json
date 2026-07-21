@@ -2,7 +2,22 @@
   "name": "@restec/connector-mock-pos",
   "version": "0.1.0",
   "type": "module",
-  "exports": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b --force tsconfig.json"
+  },
   "dependencies": {
     "@restec/connector-canonical-rest": "0.1.0",
     "@restec/connector-sdk": "0.1.0"

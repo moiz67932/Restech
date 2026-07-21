@@ -34,11 +34,15 @@ export class SharedRateLimiterRequired implements RateLimiter {
 }
 
 export class HttpSharedRateLimiter implements RateLimiter {
-  constructor(
-    private readonly url: string,
-    private readonly token: string,
-    private readonly fetcher: typeof fetch = fetch,
-  ) {}
+  private readonly url: string;
+  private readonly token: string;
+  private readonly fetcher: typeof fetch;
+
+  constructor(url: string, token: string, fetcher: typeof fetch = fetch) {
+    this.url = url;
+    this.token = token;
+    this.fetcher = fetcher;
+  }
   async consume(input: RateLimitInput): Promise<RateLimitResult> {
     const response = await this.fetcher(this.url, {
       method: 'POST',

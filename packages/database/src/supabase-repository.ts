@@ -44,10 +44,13 @@ const dbError = (error: { message: string } | null) => {
   }
 };
 export class SupabaseRepository implements RestecRepository {
-  constructor(
-    private readonly db: SupabaseClient,
-    private readonly config: SupabaseRepositoryConfig,
-  ) {}
+  private readonly db: SupabaseClient;
+  private readonly config: SupabaseRepositoryConfig;
+
+  constructor(db: SupabaseClient, config: SupabaseRepositoryConfig) {
+    this.db = db;
+    this.config = config;
+  }
   async authenticateApiKey(apiKey: string, environment: Environment) {
     const prefix = apiKeyParts(apiKey);
     if (!prefix) return null;

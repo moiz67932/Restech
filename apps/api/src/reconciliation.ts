@@ -11,10 +11,13 @@ const fields = [
   'payment_status',
 ] as const;
 export class ReconciliationService {
-  constructor(
-    private repo: RestecRepository,
-    private client: PaelyClient,
-  ) {}
+  private repo: RestecRepository;
+  private client: PaelyClient;
+
+  constructor(repo: RestecRepository, client: PaelyClient) {
+    this.repo = repo;
+    this.client = client;
+  }
   async compare(
     connection: AuthorizedLocation,
     externalBillId: string,
