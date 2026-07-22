@@ -8,11 +8,36 @@ const operation = process.argv[2];
 const base = process.env.RESTEC_PUBLIC_BASE_URL;
 if (!base?.startsWith('https://')) throw new Error('Set the HTTPS sandbox RESTEC_PUBLIC_BASE_URL.');
 
+const responseFailure = async (operationName: string, response: Response) => {
+  let diagnostic = '';
+  try {
+    const payload = (await response.json()) as {
+      error?: { code?: unknown; message?: unknown; request_id?: unknown };
+    };
+    const code = typeof payload.error?.code === 'string' ? payload.error.code : undefined;
+    const message = typeof payload.error?.message === 'string' ? payload.error.message : undefined;
+    const requestId =
+      typeof payload.error?.request_id === 'string' ? payload.error.request_id : undefined;
+    diagnostic = [code, message, requestId && `request_id=${requestId}`]
+      .filter(Boolean)
+      .join(' - ');
+  } catch {
+    // The remote service did not return Restec's JSON error envelope.
+  }
+  throw new Error(
+    `${operationName} failed with HTTP ${response.status}${diagnostic ? `: ${diagnostic}` : '.'}`,
+  );
+};
+
 if (operation === 'create-bill') {
   const apiKey = process.env.RESTEC_SANDBOX_TEST_API_KEY;
   const secret = process.env.RESTEC_SANDBOX_REQUEST_SIGNING_SECRET;
   const location = process.env.RESTEC_SANDBOX_LOCATION_ID;
   if (!apiKey || !secret || !location) throw new Error('Missing sandbox POS credentials.');
+  if (!/^rst_test_[a-f0-9]{12}[A-Za-z0-9_-]+$/.test(apiKey))
+    throw new Error(
+      'RESTEC_SANDBOX_TEST_API_KEY is malformed; copy the exact rst_test_ value without an extra equals sign, quotes, or whitespace.',
+    );
   const externalBillId = process.env.RESTEC_SANDBOX_EXTERNAL_BILL_ID ?? 'INV-DEMO-1001';
   const path = `/v1/locations/${encodeURIComponent(location)}/bills/${encodeURIComponent(externalBillId)}`;
   const body = JSON.stringify({
@@ -47,7 +72,7 @@ if (operation === 'create-bill') {
     },
     body,
   });
-  if (!response.ok) throw new Error(`Sandbox bill failed with HTTP ${response.status}.`);
+  if (!response.ok) await responseFailure('Sandbox bill', response);
   console.log(await response.text());
 } else if (operation === 'dispatch' || operation === 'reconcile') {
   const token = process.env.RESTEC_INTERNAL_JOB_TOKEN;
@@ -68,6 +93,6 @@ if (operation === 'create-bill') {
       action: 'compare',
     });
   const response = await fetch(new URL(path, base), init);
-  if (!response.ok) throw new Error(`Sandbox ${operation} failed with HTTP ${response.status}.`);
+  if (!response.ok) await responseFailure(`Sandbox ${operation}`, response);
   console.log(await response.text());
 } else throw new Error('Expected create-bill, dispatch, or reconcile.');

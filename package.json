@@ -21,7 +21,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "pretest": "npm run build:api",
-    "test": "node --import tsx --test \"packages/**/*.test.ts\" \"apps/**/*.test.ts\"",
+    "test": "node --import tsx --test \"packages/**/*.test.ts\" \"apps/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "test:leakage": "node --import tsx scripts/check-public-content.ts",
     "validate:openapi": "node --import tsx scripts/validate-openapi.ts",
     "validate:public-artifacts": "node --import tsx scripts/validate-public-artifacts.ts",
