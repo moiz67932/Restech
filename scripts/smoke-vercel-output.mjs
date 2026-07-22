@@ -43,10 +43,11 @@ assert.deepEqual(rawWorkspaceTypeScript, [], 'Vercel output contains raw workspa
 
 configureSmokeEnvironment();
 const handlerModule = await import(pathToFileURL(join(functionRoot, functionConfig.handler)).href);
-assert.equal(typeof handlerModule.default, 'function');
+assert.equal(typeof handlerModule.fetch, 'function');
+assert.equal(handlerModule.default, undefined);
 
 const server = createServer(async (request, response) => {
-  const result = await handlerModule.default(
+  const result = await handlerModule.fetch(
     new globalThis.Request(`http://127.0.0.1${request.url}`, { method: request.method }),
   );
   response.writeHead(result.status, Object.fromEntries(result.headers));

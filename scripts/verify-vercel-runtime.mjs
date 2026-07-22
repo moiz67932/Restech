@@ -89,6 +89,12 @@ const functionEntry = join(apiRoot, 'api', 'index.mjs');
 const functionSource = readFileSync(functionEntry, 'utf8');
 if (!functionSource.includes("from '../dist/bootstrap.js'"))
   fail('The Vercel function entry must import ../dist/bootstrap.js.');
+if (!/export\s+const\s+fetch\s*=/.test(functionSource))
+  fail('The Vercel function entry must expose a named Fetch API handler.');
+if (/export\s+default\b/.test(functionSource))
+  fail('The Vercel function entry must not use the default (req, res) handler signature.');
+if (functionSource.includes("from 'hono/vercel'"))
+  fail("The Vercel function entry must not wrap the app in Hono's default-export adapter.");
 if (/(?:from\s+|import\s*\()["'][^"']*(?:\/src\/|\.ts["'])/.test(functionSource))
   fail('The Vercel function entry contains a raw TypeScript/source runtime import.');
 
