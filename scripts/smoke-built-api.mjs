@@ -1,21 +1,9 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import process from 'node:process';
+import { configureSmokeEnvironment } from './smoke-environment.mjs';
 
-Object.assign(process.env, {
-  NODE_ENV: 'test',
-  RESTEC_ENV: 'test',
-  RESTEC_REPOSITORY_DRIVER: 'memory',
-  RESTEC_PUBLIC_BASE_URL: 'http://127.0.0.1:3000',
-  PAELY_PRIVATE_BASE_URL: 'https://private.example.invalid',
-  PAELY_SERVICE_ID: 'runtime-smoke',
-  PAELY_PRIVATE_BEARER_TOKEN: 'runtime-smoke-bearer-token',
-  PAELY_PRIVATE_SIGNING_SECRET: 'runtime-smoke-request-secret',
-  PAELY_EVENT_SIGNING_SECRET: 'runtime-smoke-event-secret',
-  RESTEC_API_KEY_HASH_SECRET: 'runtime-smoke-api-hash-secret-000000000000',
-  RESTEC_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-  RESTEC_INTERNAL_JOB_TOKEN: 'runtime-smoke-job-token',
-});
+configureSmokeEnvironment();
 
 const [{ PaelyClient }, { RepositoryError }, { ConnectorRegistry }, security, { app }] =
   await Promise.all([

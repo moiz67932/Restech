@@ -1,16 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
   "functions": {
-    "api/index.ts": {
+    "api/index.mjs": {
       "maxDuration": 30,
-      "includeFiles": [
-        "dist/**",
-        "../../packages/*/package.json",
-        "../../packages/*/dist/**",
-        "../../packages/connectors/*/package.json",
-        "../../packages/connectors/*/dist/**"
-      ]
+      "includeFiles": "{dist/**,../../packages/**/{package.json,dist/**}}"
     }
   }
 }

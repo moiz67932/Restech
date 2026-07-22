@@ -1,0 +1,47 @@
+import process from 'node:process';
+
+const configKeys = [
+  'NODE_ENV',
+  'RESTEC_ENV',
+  'RESTEC_REPOSITORY_DRIVER',
+  'RESTEC_PUBLIC_BASE_URL',
+  'RESTEC_DATABASE_URL',
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'PAELY_PRIVATE_BASE_URL',
+  'PAELY_SERVICE_ID',
+  'PAELY_PRIVATE_BEARER_TOKEN',
+  'PAELY_PRIVATE_SIGNING_SECRET',
+  'PAELY_EVENT_SIGNING_SECRET',
+  'RESTEC_API_KEY_HASH_SECRET',
+  'RESTEC_SECRET_ENCRYPTION_KEY',
+  'RESTEC_WEBHOOK_MASTER_KEY',
+  'RESTEC_TIMESTAMP_TOLERANCE_SECONDS',
+  'RESTEC_PRIVATE_REQUEST_TIMEOUT_MS',
+  'RESTEC_POS_DELIVERY_TIMEOUT_MS',
+  'RESTEC_MAX_DELIVERY_ATTEMPTS',
+  'RESTEC_DISPATCH_BATCH_SIZE',
+  'RESTEC_INTERNAL_JOB_TOKEN',
+  'RESTEC_STRICT_RATE_LIMITING',
+  'RESTEC_SHARED_RATE_LIMITER_URL',
+  'RESTEC_SHARED_RATE_LIMITER_TOKEN',
+  'CRON_SECRET',
+];
+
+export const configureSmokeEnvironment = () => {
+  for (const key of configKeys) delete process.env[key];
+  Object.assign(process.env, {
+    NODE_ENV: 'test',
+    RESTEC_ENV: 'test',
+    RESTEC_REPOSITORY_DRIVER: 'memory',
+    RESTEC_PUBLIC_BASE_URL: 'http://127.0.0.1:3000',
+    PAELY_PRIVATE_BASE_URL: 'https://private.example.invalid',
+    PAELY_SERVICE_ID: 'runtime-smoke',
+    PAELY_PRIVATE_BEARER_TOKEN: 'runtime-smoke-bearer-token',
+    PAELY_PRIVATE_SIGNING_SECRET: 'runtime-smoke-request-secret',
+    PAELY_EVENT_SIGNING_SECRET: 'runtime-smoke-event-secret',
+    RESTEC_API_KEY_HASH_SECRET: 'runtime-smoke-api-hash-secret-000000000000',
+    RESTEC_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    RESTEC_INTERNAL_JOB_TOKEN: 'runtime-smoke-job-token',
+  });
+};

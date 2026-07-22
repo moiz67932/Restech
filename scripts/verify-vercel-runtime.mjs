@@ -85,7 +85,7 @@ for (const name of [...runtimePackages].sort()) {
   }
 }
 
-const functionEntry = join(apiRoot, 'api', 'index.ts');
+const functionEntry = join(apiRoot, 'api', 'index.mjs');
 const functionSource = readFileSync(functionEntry, 'utf8');
 if (!functionSource.includes("from '../dist/bootstrap.js'"))
   fail('The Vercel function entry must import ../dist/bootstrap.js.');
@@ -93,18 +93,18 @@ if (/(?:from\s+|import\s*\()["'][^"']*(?:\/src\/|\.ts["'])/.test(functionSource)
   fail('The Vercel function entry contains a raw TypeScript/source runtime import.');
 
 const vercelConfig = readJson(join(apiRoot, 'vercel.json'));
-const includeFiles = vercelConfig.functions?.['api/index.ts']?.includeFiles;
-if (!Array.isArray(includeFiles) || !includeFiles.includes('dist/**'))
-  fail('Vercel includeFiles must include the compiled API dist directory.');
-if (!Array.isArray(includeFiles) || !includeFiles.includes('../../packages/*/dist/**'))
-  fail('Vercel includeFiles must include compiled top-level workspace package output.');
-if (!Array.isArray(includeFiles) || !includeFiles.includes('../../packages/connectors/*/dist/**'))
-  fail('Vercel includeFiles must include compiled connector package output.');
-if (
-  Array.isArray(includeFiles) &&
-  includeFiles.some((pattern) => /packages\/\*\*$|\/src\//.test(pattern))
-)
-  fail('Vercel includeFiles must not include raw workspace source trees.');
+if (vercelConfig.framework !== null)
+  fail(
+    'vercel.json must disable framework auto-detection to prevent a second raw-source function.',
+  );
+if (vercelConfig.buildCommand !== 'npm run build')
+  fail('vercel.json must enforce npm run build before function packaging.');
+if (vercelConfig.outputDirectory !== 'public' || !existsSync(join(apiRoot, 'public')))
+  fail('The function-only Vercel project must provide its configured public output directory.');
+const includeFiles = vercelConfig.functions?.['api/index.mjs']?.includeFiles;
+const expectedIncludeFiles = '{dist/**,../../packages/**/{package.json,dist/**}}';
+if (includeFiles !== expectedIncludeFiles)
+  fail(`Vercel includeFiles must be the compiled-output-only glob ${expectedIncludeFiles}.`);
 
 const importPatterns = [
   /(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/g,

@@ -1,17 +1,23 @@
 import { z } from 'zod';
 const secret = z.string().min(16);
+const blankToUndefined = (value: unknown) => (value === '' ? undefined : value);
+const optionalEnv = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(blankToUndefined, schema.optional());
+const defaultedEnv = <T extends z.ZodTypeAny>(schema: T, defaultValue: z.input<T>) =>
+  z.preprocess(blankToUndefined, schema.default(defaultValue));
 const envBoolean = z.preprocess(
-  (value) => (value === 'true' ? true : value === 'false' ? false : value),
-  z.boolean(),
+  (value) =>
+    value === '' ? undefined : value === 'true' ? true : value === 'false' ? false : value,
+  z.boolean().default(false),
 );
 const schema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: defaultedEnv(z.enum(['development', 'test', 'production']), 'development'),
   RESTEC_ENV: z.enum(['sandbox', 'production', 'test']),
   RESTEC_REPOSITORY_DRIVER: z.enum(['memory', 'supabase']),
   RESTEC_PUBLIC_BASE_URL: z.string().url(),
-  RESTEC_DATABASE_URL: z.string().optional(),
-  SUPABASE_URL: z.string().url().optional(),
-  SUPABASE_SERVICE_ROLE_KEY: secret.optional(),
+  RESTEC_DATABASE_URL: optionalEnv(z.string()),
+  SUPABASE_URL: optionalEnv(z.string().url()),
+  SUPABASE_SERVICE_ROLE_KEY: optionalEnv(secret),
   PAELY_PRIVATE_BASE_URL: z.string().url(),
   PAELY_SERVICE_ID: z.string().min(1),
   PAELY_PRIVATE_BEARER_TOKEN: secret,
@@ -21,17 +27,20 @@ const schema = z.object({
   RESTEC_SECRET_ENCRYPTION_KEY: z
     .string()
     .refine((v) => Buffer.from(v, 'base64').length === 32, 'Must be a base64-encoded 32-byte key'),
-  RESTEC_WEBHOOK_MASTER_KEY: secret.optional(),
-  RESTEC_TIMESTAMP_TOLERANCE_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
-  RESTEC_PRIVATE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(30000).default(5000),
-  RESTEC_POS_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(500).max(30000).default(5000),
-  RESTEC_MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
-  RESTEC_DISPATCH_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
+  RESTEC_WEBHOOK_MASTER_KEY: optionalEnv(secret),
+  RESTEC_TIMESTAMP_TOLERANCE_SECONDS: defaultedEnv(z.coerce.number().int().min(30).max(900), 300),
+  RESTEC_PRIVATE_REQUEST_TIMEOUT_MS: defaultedEnv(
+    z.coerce.number().int().min(500).max(30000),
+    5000,
+  ),
+  RESTEC_POS_DELIVERY_TIMEOUT_MS: defaultedEnv(z.coerce.number().int().min(500).max(30000), 5000),
+  RESTEC_MAX_DELIVERY_ATTEMPTS: defaultedEnv(z.coerce.number().int().min(1).max(50), 10),
+  RESTEC_DISPATCH_BATCH_SIZE: defaultedEnv(z.coerce.number().int().min(1).max(100), 25),
   RESTEC_INTERNAL_JOB_TOKEN: secret,
-  RESTEC_STRICT_RATE_LIMITING: envBoolean.default(false),
-  RESTEC_SHARED_RATE_LIMITER_URL: z.string().url().optional(),
-  RESTEC_SHARED_RATE_LIMITER_TOKEN: secret.optional(),
-  CRON_SECRET: secret.optional(),
+  RESTEC_STRICT_RATE_LIMITING: envBoolean,
+  RESTEC_SHARED_RATE_LIMITER_URL: optionalEnv(z.string().url()),
+  RESTEC_SHARED_RATE_LIMITER_TOKEN: optionalEnv(secret),
+  CRON_SECRET: optionalEnv(secret),
 });
 export type Config = z.infer<typeof schema>;
 export function loadConfig(env: NodeJS.ProcessEnv): Config {

@@ -18,10 +18,10 @@ Use these exact Vercel project settings for both Restec API projects:
 | Framework Preset | `Other`         |
 | Root Directory   | `apps/api`      |
 | Build Command    | `npm run build` |
-| Output Directory | Leave unset     |
+| Output Directory | `public`        |
 | Node.js Version  | `24.x`          |
 
-Enable **Include source files outside of the Root Directory in the Build Step**. Vercel discovers the repository-root `package-lock.json`, installs the npm workspaces, and runs the API workspace build. That build force-compiles the API and its TypeScript project references, then runs `verify:vercel-runtime`. The function entry imports `apps/api/dist/bootstrap.js`; internal package exports resolve only to `packages/**/dist/index.js`. `apps/api/vercel.json` includes those generated outputs and package manifests in the function bundle without including raw workspace source directories.
+Enable **Include source files outside of the Root Directory in the Build Step**. Vercel discovers the repository-root `package-lock.json`, installs the npm workspaces, and runs the API workspace build. `apps/api/vercel.json` disables framework auto-detection so Vercel cannot generate a second function from API source, and its explicit build command enforces `npm run build` even if the dashboard Build Command is unset. That build force-compiles the API and its TypeScript project references, then runs `verify:vercel-runtime`. The plain-ESM function entry imports `apps/api/dist/bootstrap.js`; internal package exports resolve only to `packages/**/dist/index.js`. The function bundle includes those generated outputs and package manifests without including raw workspace source directories.
 
 Do not override the build command with a command that skips `npm run build`, and do not deploy if runtime verification fails. The root and API package manifests pin Node `24.x`, matching the Vercel project setting.
 

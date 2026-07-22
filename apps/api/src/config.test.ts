@@ -29,3 +29,31 @@ test('string false does not enable strict rate limiting', () =>
     loadConfig({ ...env, RESTEC_STRICT_RATE_LIMITING: 'false' }).RESTEC_STRICT_RATE_LIMITING,
     false,
   ));
+test('blank optional and defaulted variables are treated as unset', () => {
+  const config = loadConfig({
+    ...env,
+    NODE_ENV: '',
+    RESTEC_DATABASE_URL: '',
+    SUPABASE_URL: '',
+    SUPABASE_SERVICE_ROLE_KEY: '',
+    RESTEC_WEBHOOK_MASTER_KEY: '',
+    RESTEC_TIMESTAMP_TOLERANCE_SECONDS: '',
+    RESTEC_PRIVATE_REQUEST_TIMEOUT_MS: '',
+    RESTEC_POS_DELIVERY_TIMEOUT_MS: '',
+    RESTEC_MAX_DELIVERY_ATTEMPTS: '',
+    RESTEC_DISPATCH_BATCH_SIZE: '',
+    RESTEC_STRICT_RATE_LIMITING: '',
+    RESTEC_SHARED_RATE_LIMITER_URL: '',
+    RESTEC_SHARED_RATE_LIMITER_TOKEN: '',
+    CRON_SECRET: '',
+  });
+  assert.equal(config.NODE_ENV, 'development');
+  assert.equal(config.RESTEC_TIMESTAMP_TOLERANCE_SECONDS, 300);
+  assert.equal(config.RESTEC_PRIVATE_REQUEST_TIMEOUT_MS, 5000);
+  assert.equal(config.RESTEC_POS_DELIVERY_TIMEOUT_MS, 5000);
+  assert.equal(config.RESTEC_MAX_DELIVERY_ATTEMPTS, 10);
+  assert.equal(config.RESTEC_DISPATCH_BATCH_SIZE, 25);
+  assert.equal(config.RESTEC_STRICT_RATE_LIMITING, false);
+  assert.equal(config.SUPABASE_URL, undefined);
+  assert.equal(config.CRON_SECRET, undefined);
+});

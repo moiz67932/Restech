@@ -44,6 +44,7 @@
     "reconcile:sandbox": "node --import tsx scripts/sandbox-operation.ts reconcile",
     "verify:erasable-syntax": "tsc -p tsconfig.erasable.json",
     "verify:vercel-runtime": "node scripts/verify-vercel-runtime.mjs",
+    "verify:vercel-output": "node scripts/smoke-vercel-output.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:e2e:mock && npm run validate:openapi && npm run validate:public-artifacts && npm run test:leakage && npm run check:migrations && npm run build"
   },
   "devDependencies": {
