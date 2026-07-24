@@ -67,4 +67,76 @@ export class ReconciliationService {
       targetId: eventId,
     });
   }
+  async reconcilePaymentSessions(limit = 25) {
+    const sessions = await this.repo.listPaymentSessionsForReconciliation(limit);
+    let matched = 0;
+    let expired = 0;
+    let reviewRequired = 0;
+    for (const session of sessions) {
+      if (new Date(session.expiresAt).getTime() <= Date.now()) {
+        await this.repo.transitionPaymentSession(
+          session.publicPaymentSessionId,
+          'expired',
+          new Date().toISOString(),
+        );
+        expired++;
+        continue;
+      }
+      if (!session.privatePaymentSessionReference) {
+        await this.repo.createAuditLog({
+          actorType: 'service',
+          actorId: 'payment_session_reconciliation',
+          partnerId: session.partnerId,
+          connectionId: session.connectionId,
+          action: 'payment_session.creating_unattached',
+          result: 'review_required',
+          targetType: 'payment_session',
+          targetId: session.publicPaymentSessionId,
+        });
+        reviewRequired++;
+        continue;
+      }
+      try {
+        const remote = await this.client.getPaymentSession(session.privatePaymentSessionReference);
+        if (
+          remote.amountMinor !== session.amountMinor ||
+          remote.currency !== session.currency ||
+          (remote.restecPaymentSessionReference &&
+            remote.restecPaymentSessionReference !== session.publicPaymentSessionId)
+        ) {
+          reviewRequired++;
+          await this.repo.createAuditLog({
+            actorType: 'service',
+            actorId: 'payment_session_reconciliation',
+            partnerId: session.partnerId,
+            connectionId: session.connectionId,
+            action: 'payment_session.private_mismatch',
+            result: 'review_required',
+            targetType: 'payment_session',
+            targetId: session.publicPaymentSessionId,
+          });
+          continue;
+        }
+        if (remote.status !== session.status)
+          await this.repo.transitionPaymentSession(
+            session.publicPaymentSessionId,
+            remote.status,
+            remote.paidAt ?? new Date().toISOString(),
+          );
+        matched++;
+      } catch {
+        await this.repo.createAuditLog({
+          actorType: 'service',
+          actorId: 'payment_session_reconciliation',
+          partnerId: session.partnerId,
+          connectionId: session.connectionId,
+          action: 'payment_session.private_status_pending',
+          result: 'pending',
+          targetType: 'payment_session',
+          targetId: session.publicPaymentSessionId,
+        });
+      }
+    }
+    return { examined: sessions.length, matched, expired, review_required: reviewRequired };
+  }
 }

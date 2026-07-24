@@ -13,6 +13,12 @@ message.Headers.Add("X-Restec-Timestamp", ts); message.Headers.Add("X-Restec-Sig
 message.Headers.Add("X-Request-Id", "req_" + Guid.NewGuid().ToString("N")); message.Headers.Add("Idempotency-Key", "bill-INV-1001-v1");
 var response = await client.SendAsync(message); if (!response.IsSuccessStatusCode) throw new Exception($"Restec {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
 
+var paymentPath = path + "/payment-sessions"; var paymentBody = "{\"amount_minor\":10000,\"currency\":\"PKR\",\"method\":\"card\"}"; var paymentTs = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+using var paymentMessage = new HttpRequestMessage(HttpMethod.Post, "https://sandbox-api.restec.io" + paymentPath) { Content = new StringContent(paymentBody, Encoding.UTF8, "application/json") };
+paymentMessage.Headers.Add("Authorization", "Bearer " + Environment.GetEnvironmentVariable("RESTEC_API_KEY")); paymentMessage.Headers.Add("X-Restec-Environment", "sandbox"); paymentMessage.Headers.Add("X-Restec-Timestamp", paymentTs); paymentMessage.Headers.Add("X-Restec-Signature", "v1=" + Hmac(Environment.GetEnvironmentVariable("RESTEC_REQUEST_SIGNING_SECRET")!, $"{paymentTs}.POST.{paymentPath}.{paymentBody}")); paymentMessage.Headers.Add("X-Request-Id", "req_" + Guid.NewGuid().ToString("N")); paymentMessage.Headers.Add("Idempotency-Key", "hosted-payment-INV-1001-1");
+var paymentResponse = await client.SendAsync(paymentMessage); if (!paymentResponse.IsSuccessStatusCode) throw new Exception($"Restec payment session {(int)paymentResponse.StatusCode}");
+// Parse checkout_url, open it for the customer, and wait for the signed webhook.
+
 // Minimal ASP.NET endpoint body:
 // app.MapPost("/integrations/restec/webhooks", async (HttpRequest req, IDurableEventStore store) => {
 //   using var memory=new MemoryStream(); await req.Body.CopyToAsync(memory); var raw=memory.ToArray();

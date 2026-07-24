@@ -9,6 +9,14 @@ signature = hmac.new(os.environ["RESTEC_REQUEST_SIGNING_SECRET"].encode(), f"{ti
 r = requests.put("https://sandbox-api.restec.io" + path, data=body, timeout=5, headers={"Authorization":"Bearer " + os.environ["RESTEC_API_KEY"],"Content-Type":"application/json","X-Restec-Timestamp":timestamp,"X-Restec-Signature":"v1="+signature,"X-Request-Id":"req_"+uuid.uuid4().hex,"Idempotency-Key":"bill-INV-1001-v1"})
 if not r.ok: raise RuntimeError(f"Restec {r.status_code}: {r.text}")
 
+payment_path = path + "/payment-sessions"
+payment_body = json.dumps({"amount_minor":10000,"currency":"PKR","method":"card"}, separators=(",", ":"))
+payment_ts = str(int(time.time()))
+payment_sig = hmac.new(os.environ["RESTEC_REQUEST_SIGNING_SECRET"].encode(), f"{payment_ts}.POST.{payment_path}.{payment_body}".encode(), hashlib.sha256).hexdigest()
+payment = requests.post("https://sandbox-api.restec.io" + payment_path, data=payment_body, timeout=5, headers={"Authorization":"Bearer " + os.environ["RESTEC_API_KEY"],"Content-Type":"application/json","X-Restec-Environment":"sandbox","X-Restec-Timestamp":payment_ts,"X-Restec-Signature":"v1="+payment_sig,"X-Request-Id":"req_"+uuid.uuid4().hex,"Idempotency-Key":"hosted-payment-INV-1001-1"})
+if not payment.ok: raise RuntimeError(f"Restec payment session {payment.status_code}")
+print(payment.json()["checkout_url"]) # Open for the customer; wait for a verified webhook.
+
 app = Flask(__name__)
 seen = set() # Replace with a database unique constraint and invoice update transaction.
 @app.post("/integrations/restec/webhooks")

@@ -40,12 +40,16 @@ const topics = [
     'Report completed cash, card terminal, wallet terminal, voucher, or other payments. Never send card numbers, CVV, PIN, track, or raw wallet credentials.',
   ],
   [
+    'Hosted Payment Sessions',
+    'Create a card payment session for an open bill, open only the returned Restec checkout URL, then wait for a verified Restec payment.completed webhook or query the signed status endpoint. The initial state requires customer action.',
+  ],
+  [
     'Tables',
     'GET /v1/locations/{locationId}/tables and use its external_table_id in bill requests. Only active authorized mappings are accepted.',
   ],
   [
     'Payment Webhooks',
-    'Events are payment.completed, payment.failed, and payment.refunded. Partial payments can produce several completed events for one bill.',
+    'Events are payment.completed, payment.failed, payment.expired, payment.refunded, and payment.partially_refunded. Hosted-payment events include a Restec payment_session_id.',
   ],
   [
     'Webhook Verification',
@@ -53,7 +57,7 @@ const topics = [
   ],
   [
     'Payment Statuses',
-    'Close the invoice only when payment_status is paid and amount_due is zero. Reconcile all other states through bill lookup.',
+    'Close the invoice only when payment_status is paid and amount_due is zero. A hosted checkout redirect or return page is never proof of payment.',
   ],
   [
     'Retries',

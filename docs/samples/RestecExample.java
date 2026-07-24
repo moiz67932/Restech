@@ -25,6 +25,12 @@ public class RestecExample {
     HttpResponse<String> response=HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build().send(request,HttpResponse.BodyHandlers.ofString());
     if(response.statusCode()/100!=2) throw new RuntimeException("Restec "+response.statusCode()+": "+response.body());
 
+    String paymentPath=path+"/payment-sessions", paymentBody="{\"amount_minor\":10000,\"currency\":\"PKR\",\"method\":\"card\"}", paymentTs=Long.toString(Instant.now().getEpochSecond());
+    String paymentSignature="v1="+hmac(System.getenv("RESTEC_REQUEST_SIGNING_SECRET"),(paymentTs+".POST."+paymentPath+"."+paymentBody).getBytes(StandardCharsets.UTF_8));
+    HttpRequest paymentRequest=HttpRequest.newBuilder(URI.create("https://sandbox-api.restec.io"+paymentPath)).POST(HttpRequest.BodyPublishers.ofString(paymentBody)).header("Authorization","Bearer "+System.getenv("RESTEC_API_KEY")).header("Content-Type","application/json").header("X-Restec-Environment","sandbox").header("X-Restec-Timestamp",paymentTs).header("X-Restec-Signature",paymentSignature).header("X-Request-Id","req_"+UUID.randomUUID().toString().replace("-","")).header("Idempotency-Key","hosted-payment-INV-1001-1").build();
+    HttpResponse<String> paymentResponse=HttpClient.newHttpClient().send(paymentRequest,HttpResponse.BodyHandlers.ofString()); if(paymentResponse.statusCode()!=201) throw new RuntimeException("Restec payment session "+paymentResponse.statusCode());
+    // Parse checkout_url, open it for the customer, and wait for the signed webhook.
+
     Set<String> seen=ConcurrentHashMap.newKeySet(); // Replace with a database unique constraint.
     HttpServer server=HttpServer.create(new java.net.InetSocketAddress(8443),0);
     server.createContext("/integrations/restec/webhooks", exchange -> { try {

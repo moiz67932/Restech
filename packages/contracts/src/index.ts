@@ -11,6 +11,7 @@ export const publicIds = {
   payment: id('pay'),
   event: id('evt'),
   request: id('req'),
+  paymentSession: z.string().regex(/^rps_(?:test|live)_[A-Za-z0-9]+$/),
 };
 export const minorAmount = z.number().int().min(0).max(2_147_483_647);
 const metadata = z
@@ -82,6 +83,50 @@ export const externalPaymentSchema = z
     metadata,
   })
   .strict();
+export const paymentSessionStatusSchema = z.enum([
+  'creating',
+  'requires_customer_action',
+  'processing',
+  'paid',
+  'failed',
+  'expired',
+  'cancelled',
+  'refunded',
+  'partially_refunded',
+]);
+export const publicPaymentSessionStatusSchema = paymentSessionStatusSchema.exclude(['creating']);
+export const paymentSessionMethodSchema = z.enum(['card', 'google_pay']);
+export const paymentSessionRequestSchema = z
+  .object({
+    amount_minor: z.number().int().positive().max(2_147_483_647),
+    currency: z.literal('PKR'),
+    method: z.literal('card'),
+    customer: z
+      .object({
+        email: z.string().email().max(254).optional(),
+        mobile: z
+          .string()
+          .regex(/^\+?[0-9][0-9 -]{6,18}[0-9]$/)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    return_context: z
+      .object({ pos_reference: z.string().min(1).max(128).optional() })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export const privatePaymentSessionResponseSchema = z
+  .object({
+    privatePaymentSessionId: z.string().min(1).max(256),
+    status: z.enum(['requires_customer_action', 'processing']),
+    providerCheckoutUrl: z.string().url().max(4096),
+    amountMinor: z.number().int().positive(),
+    currency: z.literal('PKR'),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
 export const paymentStatusSchema = z.enum([
   'unpaid',
   'payment_in_progress',
@@ -94,7 +139,13 @@ export const paymentStatusSchema = z.enum([
 export const eventSchema = z
   .object({
     id: publicIds.event,
-    type: z.enum(['payment.completed', 'payment.failed', 'payment.refunded']),
+    type: z.enum([
+      'payment.completed',
+      'payment.failed',
+      'payment.expired',
+      'payment.refunded',
+      'payment.partially_refunded',
+    ]),
     schema_version: z.literal('2026-07-01'),
     created_at: z.string().datetime(),
     data: z
@@ -102,6 +153,7 @@ export const eventSchema = z
         location_id: publicIds.location,
         external_bill_id: z.string(),
         external_table_id: z.string(),
+        payment_session_id: publicIds.paymentSession.optional(),
         payment: z
           .object({
             restec_payment_id: publicIds.payment,
@@ -143,6 +195,10 @@ export const eventSchema = z
 export type CanonicalBillInput = z.infer<typeof billSchema>;
 export type CanonicalExternalPaymentInput = z.infer<typeof externalPaymentSchema>;
 export type CanonicalRestecEvent = z.infer<typeof eventSchema>;
+export type PaymentSessionRequest = z.infer<typeof paymentSessionRequestSchema>;
+export type PaymentSessionStatus = z.infer<typeof paymentSessionStatusSchema>;
+export type PublicPaymentSessionStatus = z.infer<typeof publicPaymentSessionStatusSchema>;
+export type PaymentSessionMethod = z.infer<typeof paymentSessionMethodSchema>;
 export type PublicErrorCode =
   | 'invalid_request'
   | 'invalid_credentials'
@@ -156,6 +212,16 @@ export type PublicErrorCode =
   | 'payload_too_large'
   | 'amount_mismatch'
   | 'invalid_status_transition'
+  | 'bill_not_payable'
+  | 'amount_exceeds_balance'
+  | 'currency_not_supported'
+  | 'payment_method_not_available'
+  | 'payment_session_expired'
+  | 'payment_session_not_found'
+  | 'payment_session_already_completed'
+  | 'payment_confirmation_pending'
+  | 'invalid_checkout_destination'
   | 'rate_limited'
   | 'internal_error'
   | 'dependency_unavailable';
+export * from './payment-session-state.js';

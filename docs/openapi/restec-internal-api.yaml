@@ -33,3 +33,24 @@ paths:
         '200': { description: Comparison result }
         '202': { description: Manual review accepted }
         '404': { description: Hidden from unauthorized callers }
+  /api/internal/jobs/reconcile-payment-sessions:
+    post:
+      operationId: reconcilePaymentSessions
+      description: Idempotently expires or compares active payment sessions. Does no work while the feature is disabled.
+      responses:
+        '202': { description: Reconciliation batch accepted or safely ignored }
+        '404': { description: Hidden from unauthorized callers }
+  /api/internal/test/payment-sessions/{paymentSessionId}/evidence:
+    get:
+      operationId: inspectSandboxPaymentSessionEvidence
+      description: Protected, sanitized sandbox certification evidence. Returns 404 outside sandbox.
+      responses:
+        '200': { description: Sanitized evidence summary }
+        '404': { description: Hidden or not found }
+  /api/internal/test/mock-pos-webhook/last:
+    get:
+      operationId: inspectLastMockPosReceipt
+      description: Protected, sanitized sandbox receipt summary. Returns 404 outside sandbox.
+      responses:
+        '200': { description: Sanitized receipt summary }
+        '404': { description: Hidden outside sandbox }

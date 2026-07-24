@@ -15,6 +15,14 @@ const schema = z.object({
   RESTEC_ENV: z.enum(['sandbox', 'production', 'test']),
   RESTEC_REPOSITORY_DRIVER: z.enum(['memory', 'supabase']),
   RESTEC_PUBLIC_BASE_URL: z.string().url(),
+  RESTEC_PAYMENT_SESSIONS_ENABLED: envBoolean,
+  RESTEC_PAYMENT_SESSION_TTL_SECONDS: defaultedEnv(z.coerce.number().int().min(300).max(3600), 900),
+  RESTEC_CHECKOUT_PUBLIC_BASE_URL: optionalEnv(z.string().url()),
+  RESTEC_ALLOWED_PAYMENT_CHECKOUT_HOSTS: defaultedEnv(z.string(), ''),
+  RESTEC_PAYMENT_SESSION_RETURN_POLL_SECONDS: defaultedEnv(
+    z.coerce.number().int().min(1).max(30),
+    2,
+  ),
   RESTEC_DATABASE_URL: optionalEnv(z.string()),
   SUPABASE_URL: optionalEnv(z.string().url()),
   SUPABASE_SERVICE_ROLE_KEY: optionalEnv(secret),
@@ -23,6 +31,7 @@ const schema = z.object({
   PAELY_PRIVATE_BEARER_TOKEN: secret,
   PAELY_PRIVATE_SIGNING_SECRET: secret,
   PAELY_EVENT_SIGNING_SECRET: secret,
+  PAELY_EVENT_SERVICE_ID: defaultedEnv(z.string().min(1), 'paely'),
   RESTEC_API_KEY_HASH_SECRET: z.string().min(32),
   RESTEC_SECRET_ENCRYPTION_KEY: z
     .string()
@@ -66,12 +75,22 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     )
       throw new Error('Strict production rate limiting requires a shared limiter.');
   }
+  if (config.RESTEC_PAYMENT_SESSIONS_ENABLED) {
+    if (!config.RESTEC_CHECKOUT_PUBLIC_BASE_URL?.startsWith('https://'))
+      throw new Error('Payment sessions require an HTTPS RESTEC_CHECKOUT_PUBLIC_BASE_URL.');
+    const hosts = config.RESTEC_ALLOWED_PAYMENT_CHECKOUT_HOSTS.split(',')
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    if (!hosts.length || hosts.some((host) => host.includes('/') || host.includes(':')))
+      throw new Error('Payment sessions require exact checkout host names.');
+  }
   return config;
 }
 export const sanitizedConfig = (c: Config) => ({
   environment: c.RESTEC_ENV,
   repository_driver: c.RESTEC_REPOSITORY_DRIVER,
   public_base_url: c.RESTEC_PUBLIC_BASE_URL,
+  payment_sessions_enabled: c.RESTEC_PAYMENT_SESSIONS_ENABLED,
   private_base_url_configured: Boolean(c.PAELY_PRIVATE_BASE_URL),
   strict_rate_limiting: c.RESTEC_STRICT_RATE_LIMITING,
   private_timeout_ms: c.RESTEC_PRIVATE_REQUEST_TIMEOUT_MS,

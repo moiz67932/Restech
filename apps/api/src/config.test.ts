@@ -16,7 +16,24 @@ const env = {
   RESTEC_INTERNAL_JOB_TOKEN: '1234567890123456',
 };
 test('memory driver is accepted only for explicit test configuration', () =>
-  assert.equal(loadConfig(env).RESTEC_REPOSITORY_DRIVER, 'memory'));
+  assert.deepEqual(
+    {
+      driver: loadConfig(env).RESTEC_REPOSITORY_DRIVER,
+      paymentSessions: loadConfig(env).RESTEC_PAYMENT_SESSIONS_ENABLED,
+    },
+    { driver: 'memory', paymentSessions: false },
+  ));
+test('enabled payment sessions require an HTTPS Restec base and exact hosts', () =>
+  assert.throws(
+    () =>
+      loadConfig({
+        ...env,
+        RESTEC_PAYMENT_SESSIONS_ENABLED: 'true',
+        RESTEC_CHECKOUT_PUBLIC_BASE_URL: 'https://api.example',
+        RESTEC_ALLOWED_PAYMENT_CHECKOUT_HOSTS: '',
+      }),
+    /exact checkout host names/,
+  ));
 test('sandbox refuses memory repository', () =>
   assert.throws(() => loadConfig({ ...env, RESTEC_ENV: 'sandbox' }), /supabase is required/));
 test('Supabase driver fails fast without server credentials', () =>

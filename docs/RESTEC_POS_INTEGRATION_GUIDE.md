@@ -19,7 +19,7 @@ Credentials never cross environments. Each credential set contains an API key, r
 
 ## Request signing
 
-Every `/v1` request requires `Authorization`, `X-Restec-Timestamp`, `X-Restec-Signature`, `X-Request-Id`, and `Content-Type: application/json`. Mutations also require `Idempotency-Key`.
+Every `/v1` request requires `Authorization`, `X-Restec-Timestamp`, `X-Restec-Signature`, `X-Request-Id`, and `Content-Type: application/json`. Payment-session requests also require `X-Restec-Environment: sandbox` or `production`. Mutations require `Idempotency-Key`.
 
 Build the signing input without added whitespace:
 
@@ -97,6 +97,55 @@ The response contains only Restec and POS identifiers plus the canonical bill/pa
 
 Methods are `cash`, `card_terminal`, `wallet_terminal`, `voucher`, or `other`. Never send PAN, card number, CVV, PIN, track data, bank credentials, or raw wallet credentials. Reuse `external_payment_id` only for the same payment fact.
 
+## Hosted payment sessions
+
+The hosted-checkout flow is asynchronous:
+
+1. Create or update the bill.
+2. `POST /v1/locations/{locationId}/bills/{externalBillId}/payment-sessions`.
+3. Open the returned Restec `checkout_url` for the customer.
+4. Wait for a signed `payment.completed` webhook.
+5. Verify the signature and deduplicate `event_id` before updating the POS invoice.
+6. Optionally query `GET /v1/locations/{locationId}/payment-sessions/{paymentSessionId}`.
+
+Request:
+
+```json
+{
+  "amount_minor": 10000,
+  "currency": "PKR",
+  "method": "card",
+  "customer": {
+    "email": "sandbox@example.com",
+    "mobile": "03000000000"
+  },
+  "return_context": {
+    "pos_reference": "optional-safe-reference"
+  }
+}
+```
+
+Initial response:
+
+```json
+{
+  "payment_session_id": "rps_test_example",
+  "location_id": "loc_example",
+  "external_bill_id": "INV-1001",
+  "status": "requires_customer_action",
+  "checkout_url": "https://sandbox-api.restec.io/s/rps_test_example",
+  "amount_minor": 10000,
+  "currency": "PKR",
+  "method": "card",
+  "expires_at": "2026-07-23T12:30:00Z",
+  "created_at": "2026-07-23T12:15:00Z"
+}
+```
+
+Card data is entered only on the secure hosted payment page. Never send PAN, card number, CVV, expiry, PIN, OTP, or track data to Restec. The initial state is not a completed payment, the browser redirect is not proof of payment, and browser return parameters are not authoritative. Trust a Restec webhook only after exact-body signature verification, or use the authenticated status endpoint.
+
+Public states are `requires_customer_action`, `processing`, `paid`, `failed`, `expired`, `cancelled`, `refunded`, and `partially_refunded`. When the feature is unavailable in an environment, its create, status, and browser redirect routes return `404`.
+
 ## Tables
 
 `GET /v1/locations/{locationId}/tables` returns `table_id`, `external_table_id`, name, and active state. Use the external ID assigned during onboarding when sending a bill.
@@ -107,7 +156,7 @@ Restec posts to the certified HTTPS endpoint with `X-Restec-Event-Id`, `X-Restec
 
 In one durable transaction: insert the event ID into a unique column, store the payload or required update, and commit. Return `200`, `201`, `202`, or `204` afterward. A unique-conflict means the event was already accepted and should receive success without a second financial action.
 
-Events are `payment.completed`, `payment.failed`, and `payment.refunded`. The same bill may receive several completed events for partial payments. Close an invoice only when both `payment_status = paid` and `amount_due = 0`.
+Events are `payment.completed`, `payment.failed`, `payment.expired`, `payment.refunded`, and `payment.partially_refunded`. Hosted-payment events include a Restec `payment_session_id`. The same bill may receive several completed events for partial payments. Close an invoice only when both `payment_status = paid` and `amount_due = 0`.
 
 Delivery retries keep the same event ID. Temporary failures retry after 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, 6 hours, and 12 hours. Responses `400`, `401`, `403`, `404`, `409`, and `422` are permanent unless an exception is agreed during certification.
 

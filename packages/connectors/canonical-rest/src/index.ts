@@ -31,6 +31,7 @@ export const canonicalRestConnector: PosConnector = {
           'X-Restec-Event-Id': ctx.eventId,
           'X-Restec-Timestamp': String(timestamp),
           'X-Restec-Signature': signEvent(secret, timestamp, payload.body),
+          'X-Restec-Environment': ctx.environment === 'production' ? 'production' : 'sandbox',
           'X-Restec-Delivery-Attempt': String(ctx.attempt),
         },
         body: payload.body,

@@ -11,12 +11,18 @@ import type {
   Environment,
   IdempotencyRecord,
   PrivateEventInput,
+  PaymentSessionRecord,
+  CreatePaymentSessionInput,
+  AttachPaymentSessionInput,
+  PaymentSessionEventInput,
+  MockPosReceipt,
   RestecRepository,
 } from './repository.js';
 import {
   eventSchema,
   type CanonicalBillInput,
   type CanonicalExternalPaymentInput,
+  type PaymentSessionStatus,
 } from '@restec/contracts';
 
 export interface SupabaseRepositoryConfig {
@@ -35,6 +41,7 @@ const publicRepositoryCodes = new Set([
   'payment_in_progress',
   'bill_already_paid',
   'amount_mismatch',
+  'invalid_status_transition',
 ]);
 const dbError = (error: { message: string } | null) => {
   if (error) {
@@ -43,6 +50,38 @@ const dbError = (error: { message: string } | null) => {
     throw new Error('Database operation failed');
   }
 };
+const paymentSessionRow = (data: any): PaymentSessionRecord => ({
+  id: data.id,
+  publicPaymentSessionId: data.public_payment_session_id,
+  environment: data.environment,
+  partnerId: data.partner_id,
+  connectionId: data.connection_id,
+  locationId: data.location_id,
+  externalBillId: data.external_bill_id,
+  privateLocationReference: data.private_location_reference,
+  privateConnectionReference: data.private_connection_reference,
+  ...(data.private_payment_session_reference
+    ? { privatePaymentSessionReference: data.private_payment_session_reference }
+    : {}),
+  ...(data.encrypted_provider_checkout_url
+    ? { encryptedProviderCheckoutUrl: data.encrypted_provider_checkout_url }
+    : {}),
+  ...(data.provider_checkout_host ? { providerCheckoutHost: data.provider_checkout_host } : {}),
+  method: data.method,
+  amountMinor: Number(data.amount_minor),
+  currency: data.currency,
+  status: data.status,
+  expiresAt: data.expires_at,
+  ...(data.paid_at ? { paidAt: data.paid_at } : {}),
+  ...(data.failed_at ? { failedAt: data.failed_at } : {}),
+  ...(data.cancelled_at ? { cancelledAt: data.cancelled_at } : {}),
+  idempotencyKey: data.idempotency_key,
+  requestFingerprint: data.request_fingerprint,
+  createdAt: data.created_at,
+  updatedAt: data.updated_at,
+  ...(data.last_public_error_code ? { lastPublicErrorCode: data.last_public_error_code } : {}),
+  ...(data.last_private_status ? { lastPrivateStatus: data.last_private_status } : {}),
+});
 export class SupabaseRepository implements RestecRepository {
   private readonly db: SupabaseClient;
   private readonly config: SupabaseRepositoryConfig;
@@ -685,5 +724,216 @@ export class SupabaseRepository implements RestecRepository {
       metadata: input.metadata ?? {},
     });
     dbError(error);
+  }
+  async reservePaymentSession(input: CreatePaymentSessionInput) {
+    const row = {
+      public_payment_session_id: input.publicPaymentSessionId,
+      environment: input.environment,
+      partner_id: input.partnerId,
+      connection_id: input.connectionId,
+      location_id: input.locationId,
+      external_bill_id: input.externalBillId,
+      private_location_reference: input.privateLocationReference,
+      private_connection_reference: input.privateConnectionReference,
+      method: input.method,
+      amount_minor: input.amountMinor,
+      currency: input.currency,
+      status: input.status,
+      expires_at: input.expiresAt,
+      idempotency_key: input.idempotencyKey,
+      request_fingerprint: input.requestFingerprint,
+    };
+    const { data, error } = await this.db.from('payment_sessions').insert(row).select('*').single();
+    if (!error && data) return { record: paymentSessionRow(data), created: true };
+    if (error?.code !== '23505') dbError(error);
+    const { data: existing, error: readError } = await this.db
+      .from('payment_sessions')
+      .select('*')
+      .eq('public_payment_session_id', input.publicPaymentSessionId)
+      .maybeSingle();
+    dbError(readError);
+    if (!existing) throw new RepositoryError('payment_in_progress');
+    if (existing.request_fingerprint !== input.requestFingerprint)
+      throw new RepositoryError('idempotency_conflict');
+    return { record: paymentSessionRow(existing), created: false };
+  }
+  async attachPaymentSession(input: AttachPaymentSessionInput) {
+    const { data, error } = await this.db
+      .from('payment_sessions')
+      .update({
+        private_payment_session_reference: input.privatePaymentSessionReference,
+        encrypted_provider_checkout_url: input.encryptedProviderCheckoutUrl,
+        provider_checkout_host: input.providerCheckoutHost,
+        status: input.status,
+        expires_at: input.expiresAt,
+        last_private_status: input.status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('public_payment_session_id', input.publicPaymentSessionId)
+      .in('status', ['creating', 'requires_customer_action', 'processing'])
+      .select('*')
+      .single();
+    dbError(error);
+    if (!data) throw new RepositoryError('resource_not_found');
+    return paymentSessionRow(data);
+  }
+  async getPaymentSession(publicPaymentSessionId: string) {
+    const { data, error } = await this.db
+      .from('payment_sessions')
+      .select('*')
+      .eq('public_payment_session_id', publicPaymentSessionId)
+      .maybeSingle();
+    dbError(error);
+    return data ? paymentSessionRow(data) : null;
+  }
+  async transitionPaymentSession(
+    publicPaymentSessionId: string,
+    requestedStatus: PaymentSessionStatus,
+    occurredAt: string,
+  ) {
+    const { data, error } = await this.db.rpc('transition_payment_session', {
+      p_public_payment_session_id: publicPaymentSessionId,
+      p_requested_status: requestedStatus,
+      p_occurred_at: occurredAt,
+    });
+    dbError(error);
+    const result = data?.[0];
+    if (!result?.session) throw new RepositoryError('resource_not_found');
+    return { record: paymentSessionRow(result.session), changed: Boolean(result.changed) };
+  }
+  async acceptPaymentSessionEvent(input: PaymentSessionEventInput) {
+    const { data, error } = await this.db.rpc('accept_payment_session_event', {
+      p_private_event_id: input.privateEventId,
+      p_event_type: input.eventType,
+      p_schema_version: input.schemaVersion,
+      p_connection_id: input.connectionId,
+      p_request_hash: input.requestHash,
+      p_payload: input.payload,
+      p_public_event_id: input.publicEventId,
+      p_public_payload: input.publicPayload,
+      p_public_payment_session_id: input.publicPaymentSessionId,
+      p_requested_status: input.requestedStatus,
+    });
+    dbError(error);
+    const result = data?.[0];
+    return {
+      eventId: result?.event_id ?? input.publicEventId,
+      duplicate: result?.accepted === false,
+    };
+  }
+  async getMockPosWebhookContext(eventId: string) {
+    const { data, error } = await this.db
+      .from('pos_outbox_events')
+      .select('connection_id')
+      .eq('public_event_id', eventId)
+      .maybeSingle();
+    dbError(error);
+    if (!data) return null;
+    const connection = await this.authorizeConnection(data.connection_id);
+    const secret = connection?.configuration.webhook_secret;
+    return connection && typeof secret === 'string'
+      ? { connectionId: connection.connectionId, signingSecret: secret }
+      : null;
+  }
+  async acceptMockPosReceipt(input: MockPosReceipt) {
+    const { error } = await this.db.from('mock_pos_receipts').insert({
+      event_id: input.eventId,
+      connection_id: input.connectionId,
+      request_hash: input.requestHash,
+      event_type: input.eventType,
+      received_at: input.receivedAt,
+    });
+    if (!error) return { duplicate: false };
+    if (error.code !== '23505') dbError(error);
+    const { data, error: readError } = await this.db
+      .from('mock_pos_receipts')
+      .select('request_hash')
+      .eq('event_id', input.eventId)
+      .single();
+    dbError(readError);
+    if (data?.request_hash !== input.requestHash) throw new RepositoryError('replay_detected');
+    return { duplicate: true };
+  }
+  async getLastMockPosReceipt() {
+    const { data, error } = await this.db
+      .from('mock_pos_receipts')
+      .select('event_id,connection_id,request_hash,event_type,received_at')
+      .order('received_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    dbError(error);
+    return data
+      ? {
+          eventId: data.event_id,
+          connectionId: data.connection_id,
+          requestHash: data.request_hash,
+          eventType: data.event_type,
+          receivedAt: data.received_at,
+        }
+      : null;
+  }
+  async getPaymentSessionCertificationEvidence(publicPaymentSessionId: string) {
+    const session = await this.getPaymentSession(publicPaymentSessionId);
+    if (!session) return null;
+    const [billResult, outboxResult] = await Promise.all([
+      this.db
+        .from('bill_mappings')
+        .select('payment_status')
+        .eq('connection_id', session.connectionId)
+        .eq('external_bill_id', session.externalBillId)
+        .maybeSingle(),
+      this.db
+        .from('pos_outbox_events')
+        .select('id,public_event_id,status,deduplication_key,attempt_count')
+        .eq('connection_id', session.connectionId)
+        .contains('payload', { data: { payment_session_id: publicPaymentSessionId } })
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+    dbError(billResult.error);
+    dbError(outboxResult.error);
+    const outbox = outboxResult.data;
+    let privateEventAccepted = false;
+    let mockPosAccepted = false;
+    if (outbox) {
+      const [inboxResult, receiptResult] = await Promise.all([
+        this.db
+          .from('private_event_inbox')
+          .select('private_event_id')
+          .eq('private_event_id', outbox.deduplication_key)
+          .eq('status', 'accepted')
+          .maybeSingle(),
+        this.db
+          .from('mock_pos_receipts')
+          .select('event_id')
+          .eq('event_id', outbox.public_event_id)
+          .maybeSingle(),
+      ]);
+      dbError(inboxResult.error);
+      dbError(receiptResult.error);
+      privateEventAccepted = Boolean(inboxResult.data);
+      mockPosAccepted = Boolean(receiptResult.data);
+    }
+    return {
+      paymentSessionStatus: session.status,
+      billPaymentStatus: billResult.data?.payment_status ?? null,
+      privateEventAccepted,
+      publicEventId: outbox?.public_event_id ?? null,
+      posOutboxStatus: outbox?.status ?? null,
+      deliveryAttempts: outbox?.attempt_count ?? 0,
+      mockPosAccepted,
+      deadLettered: outbox?.status === 'dead_letter',
+    };
+  }
+  async listPaymentSessionsForReconciliation(limit: number) {
+    const { data, error } = await this.db
+      .from('payment_sessions')
+      .select('*')
+      .in('status', ['creating', 'requires_customer_action', 'processing'])
+      .order('updated_at', { ascending: true })
+      .limit(limit);
+    dbError(error);
+    return (data ?? []).map(paymentSessionRow);
   }
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createClient } from '@supabase/supabase-js';
+import { SupabaseRepository } from './supabase-repository.js';
 const enabled =
   (process.env.RUN_REMOTE_SANDBOX_TESTS === 'true' ||
     process.env.RUN_DATABASE_INTEGRATION === 'true') &&
@@ -92,5 +93,64 @@ test(
     ]);
     assert.equal(inbox, 1);
     assert.equal(outbox, 1);
+  },
+);
+test(
+  'database payment-session repository applies additive state transitions consistently',
+  { skip: !enabled },
+  async () => {
+    const db = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+      auth: { persistSession: false },
+    });
+    const repository = new SupabaseRepository(db, {
+      apiKeyHashSecret: 'integration-test-pepper-32-bytes-minimum',
+      secretEncryptionKey: Buffer.alloc(32).toString('base64'),
+    });
+    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const publicPaymentSessionId = `rps_test_${suffix}`;
+    const input = {
+      publicPaymentSessionId,
+      environment: 'sandbox' as const,
+      partnerId: 'ptr_sandbox_demo',
+      connectionId: 'con_sandbox_canonical',
+      locationId: 'loc_sandbox_demo',
+      externalBillId: `DB-PAYMENT-${suffix}`,
+      privateLocationReference: '00000000-0000-4000-8000-000000000101',
+      privateConnectionReference: '00000000-0000-4000-8000-000000000201',
+      method: 'card' as const,
+      amountMinor: 100,
+      currency: 'PKR' as const,
+      status: 'creating' as const,
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      idempotencyKey: `db-payment-${suffix}`,
+      requestFingerprint: suffix,
+    };
+    const first = await repository.reservePaymentSession(input);
+    const replay = await repository.reservePaymentSession(input);
+    assert.equal(first.created, true);
+    assert.equal(replay.created, false);
+    await repository.attachPaymentSession({
+      publicPaymentSessionId,
+      privatePaymentSessionReference: `private-${suffix}`,
+      encryptedProviderCheckoutUrl: 'ciphertext.placeholder.value',
+      providerCheckoutHost: 'checkout.example',
+      status: 'requires_customer_action',
+      expiresAt: input.expiresAt,
+    });
+    await repository.transitionPaymentSession(
+      publicPaymentSessionId,
+      'cancelled',
+      new Date().toISOString(),
+    );
+    const authoritative = await repository.transitionPaymentSession(
+      publicPaymentSessionId,
+      'paid',
+      new Date().toISOString(),
+    );
+    assert.equal(authoritative.record.status, 'paid');
+    assert.equal(
+      (await repository.getPaymentSession(publicPaymentSessionId))?.paidAt !== undefined,
+      true,
+    );
   },
 );

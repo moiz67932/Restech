@@ -2,6 +2,8 @@ import type {
   CanonicalBillInput,
   CanonicalExternalPaymentInput,
   CanonicalRestecEvent,
+  PaymentSessionMethod,
+  PaymentSessionStatus,
 } from '@restec/contracts';
 
 export type Environment = 'sandbox' | 'production';
@@ -12,7 +14,8 @@ export type RepositoryErrorCode =
   | 'bill_version_conflict'
   | 'payment_in_progress'
   | 'bill_already_paid'
-  | 'amount_mismatch';
+  | 'amount_mismatch'
+  | 'invalid_status_transition';
 export class RepositoryError extends Error {
   public readonly code: RepositoryErrorCode;
 
@@ -124,6 +127,77 @@ export interface AuditInput {
   targetId?: string;
   metadata?: Record<string, unknown>;
 }
+export interface PaymentSessionRecord {
+  id: string;
+  publicPaymentSessionId: string;
+  environment: Environment;
+  partnerId: string;
+  connectionId: string;
+  locationId: string;
+  externalBillId: string;
+  privateLocationReference: string;
+  privateConnectionReference: string;
+  privatePaymentSessionReference?: string;
+  encryptedProviderCheckoutUrl?: string;
+  providerCheckoutHost?: string;
+  method: PaymentSessionMethod;
+  amountMinor: number;
+  currency: 'PKR';
+  status: PaymentSessionStatus;
+  expiresAt: string;
+  paidAt?: string;
+  failedAt?: string;
+  cancelledAt?: string;
+  idempotencyKey: string;
+  requestFingerprint: string;
+  createdAt: string;
+  updatedAt: string;
+  lastPublicErrorCode?: string;
+  lastPrivateStatus?: string;
+}
+export type CreatePaymentSessionInput = Omit<
+  PaymentSessionRecord,
+  | 'id'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'privatePaymentSessionReference'
+  | 'encryptedProviderCheckoutUrl'
+  | 'providerCheckoutHost'
+  | 'paidAt'
+  | 'failedAt'
+  | 'cancelledAt'
+  | 'lastPublicErrorCode'
+  | 'lastPrivateStatus'
+>;
+export interface AttachPaymentSessionInput {
+  publicPaymentSessionId: string;
+  privatePaymentSessionReference: string;
+  encryptedProviderCheckoutUrl: string;
+  providerCheckoutHost: string;
+  status: 'requires_customer_action' | 'processing';
+  expiresAt: string;
+}
+export interface PaymentSessionEventInput extends PrivateEventInput {
+  publicPaymentSessionId: string;
+  requestedStatus: PaymentSessionStatus;
+}
+export interface MockPosReceipt {
+  eventId: string;
+  connectionId: string;
+  requestHash: string;
+  eventType: string;
+  receivedAt: string;
+}
+export interface PaymentSessionCertificationEvidence {
+  paymentSessionStatus: PaymentSessionStatus;
+  billPaymentStatus: string | null;
+  privateEventAccepted: boolean;
+  publicEventId: string | null;
+  posOutboxStatus: string | null;
+  deliveryAttempts: number;
+  mockPosAccepted: boolean;
+  deadLettered: boolean;
+}
 export interface RestecRepository {
   authenticateApiKey(
     apiKey: string,
@@ -203,4 +277,26 @@ export interface RestecRepository {
     amount?: number,
   ): Promise<{ eventId: string }>;
   createAuditLog(input: AuditInput): Promise<void>;
+  reservePaymentSession(
+    input: CreatePaymentSessionInput,
+  ): Promise<{ record: PaymentSessionRecord; created: boolean }>;
+  attachPaymentSession(input: AttachPaymentSessionInput): Promise<PaymentSessionRecord>;
+  getPaymentSession(publicPaymentSessionId: string): Promise<PaymentSessionRecord | null>;
+  transitionPaymentSession(
+    publicPaymentSessionId: string,
+    requestedStatus: PaymentSessionStatus,
+    occurredAt: string,
+  ): Promise<{ record: PaymentSessionRecord; changed: boolean }>;
+  acceptPaymentSessionEvent(
+    input: PaymentSessionEventInput,
+  ): Promise<{ eventId: string; duplicate: boolean }>;
+  getMockPosWebhookContext(
+    eventId: string,
+  ): Promise<{ connectionId: string; signingSecret: string } | null>;
+  acceptMockPosReceipt(input: MockPosReceipt): Promise<{ duplicate: boolean }>;
+  getLastMockPosReceipt(): Promise<MockPosReceipt | null>;
+  getPaymentSessionCertificationEvidence(
+    publicPaymentSessionId: string,
+  ): Promise<PaymentSessionCertificationEvidence | null>;
+  listPaymentSessionsForReconciliation(limit: number): Promise<PaymentSessionRecord[]>;
 }

@@ -4,9 +4,11 @@ info:
   version: 2026-07-01
   description: |
     Public interface for restaurant POS bill synchronization, external payment reporting,
-    reconciliation, and signed payment-status webhooks. Money uses integer minor units.
+    hosted payment sessions, reconciliation, and signed payment-status webhooks. Money uses integer minor units.
     Sign requests over `timestamp.METHOD.path.exact_raw_body`. Mutations are idempotent.
-    The sandbox and production credential sets are isolated.
+    The sandbox and production credential sets are isolated. Card data is entered only on the
+    secure hosted payment page. A checkout redirect is never proof of payment; completion is
+    asynchronous and authoritative only through a verified Restec webhook or status response.
 servers:
   - url: https://sandbox-api.restec.io
     description: Sandbox
@@ -16,6 +18,7 @@ security: [{ bearerAuth: [], requestSignature: [] }]
 tags:
   - { name: Bills, description: Create, update, and reconcile bills. }
   - { name: Payments, description: Report completed external payment facts. }
+  - { name: Payment Sessions, description: Start and query secure hosted payment sessions. }
   - { name: Tables, description: Retrieve authorized table mappings. }
   - { name: Sandbox, description: Exercise the real event delivery pipeline in sandbox only. }
 paths:
@@ -93,6 +96,59 @@ paths:
           '409': { $ref: '#/components/responses/Error' },
           '422': { $ref: '#/components/responses/Error' },
         }
+  /v1/locations/{locationId}/bills/{externalBillId}/payment-sessions:
+    parameters:
+      - { $ref: '#/components/parameters/LocationId' }
+      - { $ref: '#/components/parameters/ExternalBillId' }
+      - { $ref: '#/components/parameters/Timestamp' }
+      - { $ref: '#/components/parameters/Signature' }
+      - { $ref: '#/components/parameters/RequestId' }
+      - { $ref: '#/components/parameters/Environment' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+    post:
+      tags: [Payment Sessions]
+      operationId: createPaymentSession
+      description: |
+        Creates a hosted payment session in `requires_customer_action`. Open the returned
+        Restec checkout URL. Do not send PAN, CVV, expiry, PIN, OTP, or track data.
+        The route returns 404 while payment sessions are disabled for an environment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentSessionInput' }
+      responses:
+        '201':
+          description: Customer action is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentSessionCreated' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/locations/{locationId}/payment-sessions/{paymentSessionId}:
+    parameters:
+      - { $ref: '#/components/parameters/LocationId' }
+      - { $ref: '#/components/parameters/PaymentSessionId' }
+      - { $ref: '#/components/parameters/Timestamp' }
+      - { $ref: '#/components/parameters/Signature' }
+      - { $ref: '#/components/parameters/RequestId' }
+      - { $ref: '#/components/parameters/Environment' }
+    get:
+      tags: [Payment Sessions]
+      operationId: getPaymentSession
+      description: Returns the current Restec payment state. The signed GET body is empty.
+      responses:
+        '200':
+          description: Current payment session state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentSessionStatus' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /v1/locations/{locationId}/tables:
     parameters:
       [
@@ -223,6 +279,20 @@ components:
         required: true,
         schema: { type: string, minLength: 1, maxLength: 128 },
       }
+    PaymentSessionId:
+      {
+        name: paymentSessionId,
+        in: path,
+        required: true,
+        schema: { type: string, pattern: '^rps_(test|live)_[A-Za-z0-9]+$' },
+      }
+    Environment:
+      {
+        name: X-Restec-Environment,
+        in: header,
+        required: true,
+        schema: { type: string, enum: [sandbox, production] },
+      }
     Timestamp:
       {
         name: X-Restec-Timestamp,
@@ -324,6 +394,98 @@ components:
             metadata: { type: object },
           },
       }
+    PaymentSessionInput:
+      type: object
+      additionalProperties: false
+      required: [amount_minor, currency, method]
+      properties:
+        amount_minor: { type: integer, minimum: 1, maximum: 2147483647 }
+        currency: { const: PKR }
+        method: { type: string, enum: [card] }
+        customer:
+          type: object
+          additionalProperties: false
+          properties:
+            email: { type: string, format: email, maxLength: 254 }
+            mobile: { type: string, minLength: 8, maxLength: 20 }
+        return_context:
+          type: object
+          additionalProperties: false
+          properties:
+            pos_reference: { type: string, maxLength: 128 }
+    PaymentSessionState:
+      type: string
+      enum:
+        [
+          requires_customer_action,
+          processing,
+          paid,
+          failed,
+          expired,
+          cancelled,
+          refunded,
+          partially_refunded,
+        ]
+    PaymentSessionCreated:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          payment_session_id,
+          location_id,
+          external_bill_id,
+          status,
+          checkout_url,
+          amount_minor,
+          currency,
+          method,
+          expires_at,
+          created_at,
+        ]
+      properties:
+        payment_session_id: { type: string, pattern: '^rps_(test|live)_' }
+        location_id: { type: string, pattern: '^loc_' }
+        external_bill_id: { type: string }
+        status: { const: requires_customer_action }
+        checkout_url: { type: string, format: uri, description: Restec-hosted redirect URL }
+        amount_minor: { type: integer, minimum: 1 }
+        currency: { const: PKR }
+        method: { const: card }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    PaymentSessionStatus:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          payment_session_id,
+          location_id,
+          external_bill_id,
+          status,
+          amount_minor,
+          currency,
+          method,
+          expires_at,
+          paid_at,
+          failure,
+        ]
+      properties:
+        payment_session_id: { type: string, pattern: '^rps_(test|live)_' }
+        location_id: { type: string, pattern: '^loc_' }
+        external_bill_id: { type: string }
+        status: { $ref: '#/components/schemas/PaymentSessionState' }
+        amount_minor: { type: integer, minimum: 1 }
+        currency: { const: PKR }
+        method: { const: card }
+        expires_at: { type: string, format: date-time }
+        paid_at: { type: [string, 'null'], format: date-time }
+        failure:
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              additionalProperties: false
+              required: [code]
+              properties: { code: { type: string } }
     BillState:
       {
         type: object,
@@ -428,6 +590,12 @@ webhooks:
             schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' },
           }
         - {
+            name: X-Restec-Environment,
+            in: header,
+            required: true,
+            schema: { type: string, enum: [sandbox, production] },
+          }
+        - {
             name: X-Restec-Delivery-Attempt,
             in: header,
             required: true,
@@ -442,7 +610,18 @@ webhooks:
               required: [id, type, schema_version, created_at, data]
               properties:
                 id: { type: string, pattern: '^evt_' }
-                type: { type: string, enum: [payment.completed, payment.failed, payment.refunded] }
+                type:
+                  {
+                    type: string,
+                    enum:
+                      [
+                        payment.completed,
+                        payment.failed,
+                        payment.expired,
+                        payment.refunded,
+                        payment.partially_refunded,
+                      ],
+                  }
                 schema_version: { const: '2026-07-01' }
                 created_at: { type: string, format: date-time }
                 data: { type: object }

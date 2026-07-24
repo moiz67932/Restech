@@ -85,3 +85,60 @@ test('private client signs exact body, preserves idempotency key, rotates reques
   assert(!('private_table_uuid' in result));
   assert(!('upstream_debug' in result));
 });
+test('payment-session client uses the private contract and deterministic idempotency', async () => {
+  let captured: Request | undefined;
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async (input, init) => {
+      captured = new Request(input, init);
+      return new Response(
+        JSON.stringify({
+          privatePaymentSessionId: 'opaque-private-id',
+          status: 'requires_customer_action',
+          providerCheckoutUrl: 'https://checkout.example/opaque-token',
+          amountMinor: 100,
+          currency: 'PKR',
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+  const body = {
+    connectionId: '00000000-0000-4000-8000-000000000001',
+    amountMinor: 100,
+    currency: 'PKR' as const,
+    method: 'card' as const,
+    returnUrls: {
+      success: 'https://api.example/s/rps_test_example/return',
+      cancel: 'https://api.example/s/rps_test_example/cancel',
+    },
+    restecPaymentSessionReference: 'rps_test_example',
+  };
+  const result = await client.createPaymentSession(
+    '00000000-0000-4000-8000-000000000002',
+    'BILL-1',
+    body,
+    'stable-private-key',
+  );
+  assert.equal(result.status, 'requires_customer_action');
+  assert.equal(captured?.headers.get('Idempotency-Key'), 'stable-private-key');
+  assert.equal(captured?.headers.get('X-Restec-Environment'), 'sandbox');
+  assert.equal(captured?.headers.get('X-Restec-Service-Id'), 'service');
+  const requestBody = await captured!.clone().text();
+  assert(
+    verifyRequestSignature({
+      secret: 'secret',
+      signature: captured!.headers.get('X-Restec-Signature')!,
+      timestamp: Number(captured!.headers.get('X-Restec-Timestamp')),
+      method: 'POST',
+      path: new URL(captured!.url).pathname,
+      rawBody: requestBody,
+    }),
+  );
+});

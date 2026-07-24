@@ -15,6 +15,11 @@ const restricted = [
   /private[_ -]paely/i,
   /paely_order_id/i,
   /private (?:bill|table|connection) (?:id|reference)/i,
+  /merchant_payment_accounts/i,
+  /private_connection_reference/i,
+  /private_location_reference/i,
+  /X-Restec-Service-Id/i,
+  /PAELY_PRIVATE_BASE_URL/i,
   /postgres(?:ql)? function/i,
 ];
 const roots = [

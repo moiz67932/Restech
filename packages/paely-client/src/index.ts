@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { CanonicalBillInput, CanonicalExternalPaymentInput } from '@restec/contracts';
+import {
+  privatePaymentSessionResponseSchema,
+  type CanonicalBillInput,
+  type CanonicalExternalPaymentInput,
+  type PaymentSessionMethod,
+  type PaymentSessionStatus,
+} from '@restec/contracts';
 import { signRequest } from '@restec/security';
 
 export interface PrivateClientConfig {
@@ -44,6 +50,32 @@ export interface PublicBillState {
   version: number;
   reconciliation_status: string;
   updated_at: string;
+}
+export interface CreatePrivatePaymentSessionInput {
+  connectionId: string;
+  amountMinor: number;
+  currency: 'PKR';
+  method: PaymentSessionMethod;
+  customer?: { email?: string; mobile?: string };
+  returnUrls: { success: string; cancel: string };
+  restecPaymentSessionReference: string;
+}
+export interface PrivatePaymentSessionResult {
+  privatePaymentSessionId: string;
+  status: 'requires_customer_action' | 'processing';
+  providerCheckoutUrl: string;
+  amountMinor: number;
+  currency: 'PKR';
+  expiresAt: string;
+}
+export interface PrivatePaymentSessionState {
+  privatePaymentSessionId: string;
+  restecPaymentSessionReference?: string;
+  status: PaymentSessionStatus;
+  amountMinor: number;
+  currency: 'PKR';
+  expiresAt: string;
+  paidAt?: string | null;
 }
 export class PrivateDependencyError extends Error {
   public readonly retryable: boolean;
@@ -124,6 +156,37 @@ export class PaelyClient {
       body,
       idempotencyKey,
     );
+  }
+  async createPaymentSession(
+    locationId: string,
+    externalBillId: string,
+    body: CreatePrivatePaymentSessionInput,
+    idempotencyKey: string,
+  ): Promise<PrivatePaymentSessionResult> {
+    const data = await this.rawRequest(
+      'POST',
+      `/api/internal/integrations/restec/v1/locations/${encodeURIComponent(locationId)}/bills/${encodeURIComponent(externalBillId)}/payment-sessions`,
+      body,
+      idempotencyKey,
+    );
+    const parsed = privatePaymentSessionResponseSchema.safeParse(data);
+    if (!parsed.success) throw new PrivateDependencyError(false, 502);
+    return parsed.data;
+  }
+  async getPaymentSession(privatePaymentSessionId: string): Promise<PrivatePaymentSessionState> {
+    const data = (await this.rawRequest(
+      'GET',
+      `/api/internal/integrations/restec/v1/payment-sessions/${encodeURIComponent(privatePaymentSessionId)}`,
+    )) as PrivatePaymentSessionState;
+    if (
+      !data ||
+      typeof data.privatePaymentSessionId !== 'string' ||
+      typeof data.status !== 'string' ||
+      !Number.isSafeInteger(data.amountMinor) ||
+      data.currency !== 'PKR'
+    )
+      throw new PrivateDependencyError(false, 502);
+    return data;
   }
   private async request(
     method: string,

@@ -17,6 +17,7 @@ for (const key of [
 
 const samples = [
   'curl.md',
+  'node-javascript.mjs',
   'node-typescript.ts',
   'python.py',
   'php.php',
@@ -36,4 +37,4 @@ const result = ts.transpileModule(nodeSample, {
 });
 if (result.diagnostics?.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error))
   throw new Error('Node.js/TypeScript sample has syntax errors');
-console.log('Validated Postman collection and seven public language samples.');
+console.log('Validated Postman collection and eight public language samples.');

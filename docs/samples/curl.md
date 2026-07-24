@@ -17,4 +17,25 @@ curl --fail-with-body -X PUT "$BASE_URL$PATH_VALUE" \
   --data-binary "$BODY"
 ```
 
+Create a hosted card session only after the bill exists. Sign this body independently:
+
+```bash
+PATH_VALUE=/v1/locations/loc_example/bills/INV-1001/payment-sessions
+TIMESTAMP=$(date +%s)
+REQUEST_ID=req_$(openssl rand -hex 16)
+BODY='{"amount_minor":10000,"currency":"PKR","method":"card"}'
+SIGNATURE=v1=$(printf '%s' "$TIMESTAMP.POST.$PATH_VALUE.$BODY" | openssl dgst -sha256 -hmac "$REQUEST_SIGNING_SECRET" -hex | sed 's/^.* //')
+curl --fail-with-body -X POST "$BASE_URL$PATH_VALUE" \
+  -H "Authorization: Bearer $RESTEC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-Restec-Environment: sandbox" \
+  -H "X-Restec-Timestamp: $TIMESTAMP" \
+  -H "X-Restec-Signature: $SIGNATURE" \
+  -H "X-Request-Id: $REQUEST_ID" \
+  -H "Idempotency-Key: hosted-payment-INV-1001-1" \
+  --data-binary "$BODY"
+```
+
+Open only the returned Restec `checkout_url`; card data belongs only on the hosted page. Wait for a verified signed webhook or query the signed payment-session status endpoint. A redirect is not proof of payment.
+
 For a webhook, capture the exact body to a file before parsing, reject timestamps outside five minutes, compute `openssl dgst -sha256 -hmac "$WEBHOOK_SIGNING_SECRET"` over `timestamp + "." + body`, and compare through an application primitive that is constant-time. Insert `X-Restec-Event-Id` into a database unique column in the same transaction as the invoice update; acknowledge an already-present ID with 2xx. Treat `408`, `425`, `429`, and documented 5xx statuses as retryable; inspect the JSON error code for all other failures.

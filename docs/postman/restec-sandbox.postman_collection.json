@@ -10,7 +10,9 @@
     { "key": "request_signing_secret", "value": "replace" },
     { "key": "webhook_signing_secret", "value": "replace" },
     { "key": "location_id", "value": "loc_example" },
-    { "key": "external_bill_id", "value": "INV-1001" }
+    { "key": "external_bill_id", "value": "INV-1001" },
+    { "key": "payment_session_id", "value": "rps_test_replace" },
+    { "key": "environment", "value": "sandbox" }
   ],
   "event": [
     {
@@ -98,6 +100,52 @@
           { "key": "X-Request-Id", "value": "{{request_id}}" }
         ],
         "url": "{{base_url}}/v1/locations/{{location_id}}/tables"
+      }
+    },
+    {
+      "name": "Create hosted payment session",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) pm.collectionVariables.set('payment_session_id', pm.response.json().payment_session_id);",
+              "pm.test('Initial state requires customer action', () => pm.expect(pm.response.json().status).to.eql('requires_customer_action'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Environment", "value": "{{environment}}" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "hosted-payment-{{external_bill_id}}-1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"amount_minor\":10000,\"currency\":\"PKR\",\"method\":\"card\",\"customer\":{\"email\":\"sandbox@example.com\",\"mobile\":\"03000000000\"}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/payment-sessions",
+        "description": "Open only the returned Restec checkout_url. Card data is entered on the secure hosted payment page and payment completion is asynchronous."
+      }
+    },
+    {
+      "name": "Get hosted payment session",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Environment", "value": "{{environment}}" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" }
+        ],
+        "url": "{{base_url}}/v1/locations/{{location_id}}/payment-sessions/{{payment_session_id}}"
       }
     },
     {

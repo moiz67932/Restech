@@ -9,12 +9,19 @@ import type {
   Environment,
   IdempotencyRecord,
   PrivateEventInput,
+  PaymentSessionRecord,
+  CreatePaymentSessionInput,
+  AttachPaymentSessionInput,
+  PaymentSessionEventInput,
+  MockPosReceipt,
   RestecRepository,
 } from '@restec/database';
 import {
   eventSchema,
+  transitionPaymentSessionStatus,
   type CanonicalBillInput,
   type CanonicalExternalPaymentInput,
+  type PaymentSessionStatus,
 } from '@restec/contracts';
 import { sha256 } from '@restec/security';
 export class MemoryRepository implements RestecRepository {
@@ -34,6 +41,8 @@ export class MemoryRepository implements RestecRepository {
   outbox = new Map<string, ClaimedPosOutboxEvent>();
   attempts: DeliveryAttempt[] = [];
   audits: AuditInput[] = [];
+  paymentSessions = new Map<string, PaymentSessionRecord>();
+  mockPosReceipts = new Map<string, MockPosReceipt>();
   async authenticateApiKey(key: string, environment: Environment) {
     const value = this.credentials.get(key);
     return value?.environment === environment ? value : null;
@@ -393,5 +402,152 @@ export class MemoryRepository implements RestecRepository {
   }
   async createAuditLog(input: AuditInput) {
     this.audits.push(input);
+  }
+  async reservePaymentSession(input: CreatePaymentSessionInput) {
+    const existing = this.paymentSessions.get(input.publicPaymentSessionId);
+    if (existing) {
+      if (existing.requestFingerprint !== input.requestFingerprint)
+        throw new RepositoryError('idempotency_conflict');
+      return { record: existing, created: false };
+    }
+    const now = new Date().toISOString();
+    const record: PaymentSessionRecord = {
+      ...input,
+      id: randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.paymentSessions.set(record.publicPaymentSessionId, record);
+    return { record, created: true };
+  }
+  async attachPaymentSession(input: AttachPaymentSessionInput) {
+    const existing = this.paymentSessions.get(input.publicPaymentSessionId);
+    if (!existing) throw new RepositoryError('resource_not_found');
+    const record: PaymentSessionRecord = {
+      ...existing,
+      privatePaymentSessionReference: input.privatePaymentSessionReference,
+      encryptedProviderCheckoutUrl: input.encryptedProviderCheckoutUrl,
+      providerCheckoutHost: input.providerCheckoutHost,
+      status: input.status,
+      expiresAt: input.expiresAt,
+      lastPrivateStatus: input.status,
+      updatedAt: new Date().toISOString(),
+    };
+    this.paymentSessions.set(record.publicPaymentSessionId, record);
+    return record;
+  }
+  async getPaymentSession(publicPaymentSessionId: string) {
+    return this.paymentSessions.get(publicPaymentSessionId) ?? null;
+  }
+  async transitionPaymentSession(
+    publicPaymentSessionId: string,
+    requestedStatus: PaymentSessionStatus,
+    occurredAt: string,
+  ) {
+    const existing = this.paymentSessions.get(publicPaymentSessionId);
+    if (!existing) throw new RepositoryError('resource_not_found');
+    const transition = transitionPaymentSessionStatus(existing.status, requestedStatus);
+    if (transition.kind === 'noop') return { record: existing, changed: false };
+    const record: PaymentSessionRecord = {
+      ...existing,
+      status: requestedStatus,
+      updatedAt: occurredAt,
+      ...(requestedStatus === 'paid' ? { paidAt: occurredAt } : {}),
+      ...(requestedStatus === 'failed' ? { failedAt: occurredAt } : {}),
+      ...(requestedStatus === 'cancelled' ? { cancelledAt: occurredAt } : {}),
+    };
+    this.paymentSessions.set(publicPaymentSessionId, record);
+    return { record, changed: true };
+  }
+  async acceptPaymentSessionEvent(input: PaymentSessionEventInput) {
+    const session = this.paymentSessions.get(input.publicPaymentSessionId);
+    if (!session) {
+      const old = this.events.get(input.privateEventId);
+      if (old) {
+        if (this.eventHashes.get(input.privateEventId) !== input.requestHash)
+          throw new RepositoryError('replay_detected');
+        return { eventId: old, duplicate: true };
+      }
+      this.events.set(input.privateEventId, input.publicEventId);
+      this.eventHashes.set(input.privateEventId, input.requestHash);
+      this.audits.push({
+        actorType: 'service',
+        connectionId: input.connectionId,
+        action: 'payment_session.event_unmatched',
+        result: 'review_required',
+        targetType: 'payment_session',
+        targetId: input.publicPaymentSessionId,
+        metadata: { event_type: input.eventType },
+      });
+      return { eventId: input.publicEventId, duplicate: false };
+    }
+    transitionPaymentSessionStatus(session.status, input.requestedStatus);
+    const accepted = await this.acceptPrivateEvent(input);
+    await this.transitionPaymentSession(
+      input.publicPaymentSessionId,
+      input.requestedStatus,
+      input.publicPayload.created_at,
+    );
+    return accepted;
+  }
+  async getMockPosWebhookContext(eventId: string) {
+    const event = this.outbox.get(eventId);
+    if (!event) return null;
+    const secret = event.configuration.webhook_secret;
+    return typeof secret === 'string'
+      ? { connectionId: event.connectionId, signingSecret: secret }
+      : null;
+  }
+  async acceptMockPosReceipt(input: MockPosReceipt) {
+    const existing = this.mockPosReceipts.get(input.eventId);
+    if (existing) {
+      if (existing.requestHash !== input.requestHash) throw new RepositoryError('replay_detected');
+      return { duplicate: true };
+    }
+    this.mockPosReceipts.set(input.eventId, input);
+    return { duplicate: false };
+  }
+  async getLastMockPosReceipt() {
+    return (
+      [...this.mockPosReceipts.values()].sort((a, b) =>
+        b.receivedAt.localeCompare(a.receivedAt),
+      )[0] ?? null
+    );
+  }
+  async getPaymentSessionCertificationEvidence(publicPaymentSessionId: string) {
+    const session = this.paymentSessions.get(publicPaymentSessionId);
+    if (!session) return null;
+    const outbox = [...this.outbox.values()].find(
+      (event) => event.payload.data.payment_session_id === publicPaymentSessionId,
+    );
+    const eventId =
+      outbox?.publicEventId ??
+      [...this.mockPosReceipts.values()].find((receipt) =>
+        [...this.events.values()].includes(receipt.eventId),
+      )?.eventId ??
+      null;
+    return {
+      paymentSessionStatus: session.status,
+      billPaymentStatus:
+        this.bills.get(`${session.connectionId}:${session.externalBillId}`)?.payment_status ?? null,
+      privateEventAccepted: [...this.events.values()].some(
+        (id) => id === outbox?.publicEventId || id === eventId,
+      ),
+      publicEventId: outbox?.publicEventId ?? eventId,
+      posOutboxStatus: outbox ? 'pending' : eventId ? 'delivered' : null,
+      deliveryAttempts: outbox
+        ? this.attempts.filter((attempt) => attempt.eventId === outbox.id).length
+        : 0,
+      mockPosAccepted: eventId ? this.mockPosReceipts.has(eventId) : false,
+      deadLettered: false,
+    };
+  }
+  async listPaymentSessionsForReconciliation(limit: number) {
+    return [...this.paymentSessions.values()]
+      .filter((session) =>
+        ['creating', 'requires_customer_action', 'processing'].includes(session.status),
+      )
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .slice(0, limit);
   }
 }

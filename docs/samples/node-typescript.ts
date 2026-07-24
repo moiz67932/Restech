@@ -35,6 +35,33 @@ const response = await fetch(`https://sandbox-api.restec.io${path}`, {
 });
 if (!response.ok) throw new Error(`Restec ${response.status}: ${await response.text()}`);
 
+const paymentPath = `${path}/payment-sessions`;
+const paymentBody = JSON.stringify({ amount_minor: 10000, currency: 'PKR', method: 'card' });
+const paymentTimestamp = Math.floor(Date.now() / 1000);
+const paymentResponse = await fetch(`https://sandbox-api.restec.io${paymentPath}`, {
+  method: 'POST',
+  body: paymentBody,
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'X-Restec-Environment': 'sandbox',
+    'X-Restec-Timestamp': String(paymentTimestamp),
+    'X-Restec-Signature': `v1=${hex(
+      `${paymentTimestamp}.POST.${paymentPath}.${paymentBody}`,
+      requestSecret,
+    )}`,
+    'X-Request-Id': `req_${randomUUID().replaceAll('-', '')}`,
+    'Idempotency-Key': 'hosted-payment-INV-1001-1',
+  },
+});
+if (!paymentResponse.ok) throw new Error(`Restec payment session ${paymentResponse.status}`);
+const paymentSession = (await paymentResponse.json()) as {
+  status: 'requires_customer_action';
+  checkout_url: string;
+};
+// Open checkout_url for the customer. Do not treat the redirect as payment proof.
+console.log(paymentSession.checkout_url);
+
 const acceptedEventIds = new Set<string>(); // Replace with a database unique constraint.
 createServer((req, res) => {
   const chunks: Buffer[] = [];
