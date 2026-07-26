@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { PrivateDependencyError } from '@restec/paely-client';
 import { signEvent, signRequest } from '@restec/security';
 import { createApp } from './app.js';
 import { MemoryRepository } from './memory-repository.js';
@@ -248,4 +249,122 @@ test('mock POS bill reaches mock private service and payment event reaches POS o
   assert.equal(repo.outbox.size, 0);
   assert.equal(repo.attempts.length, 1);
   assert.equal((await repo.getBill('con_test', 'INV-1001'))?.payment_status, 'paid');
+});
+
+test('private dependency diagnostics are logged internally while the public 502 stays sanitized', async () => {
+  const repo = new MemoryRepository();
+  const apiKey = 'rst_test_aaaaaaaaaaaaexample';
+  repo.credentials.set(apiKey, {
+    partnerId: 'ptr_test',
+    environment: 'sandbox',
+    signingSecret: 'request-secret',
+    status: 'active',
+    keyPrefix: 'aaaaaaaaaaaa',
+  });
+  repo.connections.set('con_test', {
+    connectionId: 'con_test',
+    partnerId: 'ptr_test',
+    locationId: 'loc_test',
+    environment: 'sandbox',
+    connectorType: 'canonical_rest',
+    connectorVersion: '1.0.0',
+    connectorEnabled: true,
+    privateLocationId: '00000000-0000-0000-0000-000000000002',
+    privateConnectionId: '00000000-0000-0000-0000-000000000001',
+    configuration: {},
+  });
+  repo.tables.set('table', {
+    connection_id: 'con_test',
+    table_id: 'tbl_test',
+    external_table_id: '12',
+    name: 'Table 12',
+    active: true,
+  });
+  const privateClient = {
+    async upsertBillDetailed() {
+      throw new PrivateDependencyError(true, 500, {
+        operation: 'bill_upsert',
+        failureKind: 'http',
+        downstreamRequestId: 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        providerRequestId: 'provider-request-id',
+        attempts: 3,
+      });
+    },
+  } as any;
+  const app = createApp({
+    repository: repo,
+    privateClient,
+    config,
+    eventSigningSecret: 'event-secret',
+    internalJobToken: 'job-secret',
+  });
+  const path = '/v1/locations/loc_test/bills/INV-DEPENDENCY';
+  const body = JSON.stringify({
+    external_table_id: '12',
+    version: 1,
+    currency: 'PKR',
+    status: 'open',
+    order_status: 'accepted',
+    items: [
+      {
+        external_item_id: 'I1',
+        name: 'Meal',
+        quantity: 1,
+        unit_amount: 10000,
+        total_amount: 10000,
+      },
+    ],
+    totals: {
+      subtotal: 10000,
+      tax: 0,
+      service_charge: 0,
+      discount: 0,
+      tip: 0,
+      grand_total: 10000,
+    },
+    occurred_at: '2026-07-18T10:30:00Z',
+    metadata: {},
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const requestId = 'req_dependency_logging';
+  const logs: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]) => logs.push(values.map(String).join(' '));
+  try {
+    const response = await app.request(path, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'X-Restec-Timestamp': String(timestamp),
+        'X-Restec-Signature': signRequest('request-secret', timestamp, 'PUT', path, body),
+        'X-Request-Id': requestId,
+        'Idempotency-Key': 'dependency-logging-key',
+      },
+      body,
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), {
+      error: {
+        code: 'dependency_unavailable',
+        message: 'The requested operation could not be completed at this time.',
+        request_id: requestId,
+        details: { retryable: true },
+      },
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(logs.length, 1);
+  const log = JSON.parse(logs[0]!) as Record<string, unknown>;
+  assert.equal(log.event, 'restec.dependency_failure');
+  assert.equal(log.request_id, requestId);
+  assert.equal(log.dependency, 'paely_private_api');
+  assert.equal(log.operation, 'bill_upsert');
+  assert.equal(log.failure_kind, 'http');
+  assert.equal(log.downstream_status, 500);
+  assert.equal(log.downstream_request_id, 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(log.provider_request_id, 'provider-request-id');
+  assert.equal(log.attempts, 3);
+  assert(!logs[0]!.includes('private.example'));
 });

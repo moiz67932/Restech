@@ -351,7 +351,10 @@ export function createApp(deps: {
           privateResult.currency !== body.currency ||
           new Date(privateResult.expiresAt).getTime() <= Date.now()
         )
-          throw new PrivateDependencyError(false, 502);
+          throw new PrivateDependencyError(false, 502, {
+            operation: 'payment_session_create',
+            failureKind: 'invalid_response',
+          });
         let destination: URL;
         try {
           destination = await assertResolvedCheckoutDestination(
@@ -977,6 +980,21 @@ export function createApp(deps: {
     if (error instanceof PrivateDependencyError) {
       const status =
         error.status === 504 ? 504 : [408, 425, 429, 503].includes(error.status) ? 503 : 502;
+      console.error(
+        JSON.stringify({
+          event: 'restec.dependency_failure',
+          request_id: requestId,
+          dependency: error.dependency,
+          operation: error.operation,
+          failure_kind: error.failureKind,
+          downstream_status: error.status,
+          downstream_request_id: error.downstreamRequestId,
+          downstream_error_code: error.downstreamErrorCode,
+          provider_request_id: error.providerRequestId,
+          attempts: error.attempts,
+          retryable: error.retryable,
+        }),
+      );
       return c.json(
         {
           error: {

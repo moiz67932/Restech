@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PaelyClient } from './index.js';
+import { PaelyClient, PrivateDependencyError } from './index.js';
 import { verifyRequestSignature } from '@restec/security';
 test('private client signs exact body, preserves idempotency key, rotates request IDs, and removes private IDs', async () => {
   const requests: Request[] = [];
@@ -141,4 +141,93 @@ test('payment-session client uses the private contract and deterministic idempot
       rawBody: requestBody,
     }),
   );
+});
+
+test('private client consumes and classifies a Paely Vercel invocation failure', async () => {
+  const responses: Response[] = [];
+  let attempt = 0;
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async () => {
+      attempt++;
+      const response = new Response(
+        'A server error has occurred\n\nFUNCTION_INVOCATION_FAILED\n\nprivate diagnostic',
+        {
+          status: 500,
+          headers: {
+            'Content-Type': 'text/plain',
+            'X-Vercel-Id': `provider-request-${attempt}`,
+          },
+        },
+      );
+      responses.push(response);
+      return response;
+    },
+  });
+
+  await assert.rejects(
+    client.getBill('00000000-0000-4000-8000-000000000001', 'B1'),
+    (error: unknown) => {
+      assert(error instanceof PrivateDependencyError);
+      assert.equal(error.dependency, 'paely_private_api');
+      assert.equal(error.operation, 'bill_get');
+      assert.equal(error.failureKind, 'http');
+      assert.equal(error.status, 500);
+      assert.equal(error.retryable, true);
+      assert.equal(error.attempts, 3);
+      assert.match(error.downstreamRequestId ?? '', /^req_[0-9a-f]{32}$/);
+      assert.equal(error.providerRequestId, 'provider-request-3');
+      assert.equal(error.downstreamErrorCode, undefined);
+      assert(!error.message.includes('FUNCTION_INVOCATION_FAILED'));
+      return true;
+    },
+  );
+  assert.equal(attempt, 3);
+  assert(responses.every((response) => response.bodyUsed));
+});
+
+test('private client records sanitized Paely JSON error metadata without retrying', async () => {
+  let attempt = 0;
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async () => {
+      attempt++;
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 'table_mapping_not_found',
+            request_id: 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            message: 'private message that must not escape',
+          },
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    client.getBill('00000000-0000-4000-8000-000000000001', 'B1'),
+    (error: unknown) => {
+      assert(error instanceof PrivateDependencyError);
+      assert.equal(error.operation, 'bill_get');
+      assert.equal(error.status, 404);
+      assert.equal(error.retryable, false);
+      assert.equal(error.attempts, 1);
+      assert.equal(error.downstreamErrorCode, 'table_mapping_not_found');
+      assert.equal(error.downstreamRequestId, 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      assert(!error.message.includes('private message'));
+      return true;
+    },
+  );
+  assert.equal(attempt, 1);
 });
