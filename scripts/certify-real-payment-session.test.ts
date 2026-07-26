@@ -2,10 +2,29 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CertificationHttpError,
+  assertCertificationTableAvailable,
   certificationBillBody,
   cleanupCertificationBill,
   createPaymentSessionWithCleanup,
 } from './certify-real-payment-session.js';
+
+test('table preflight rejects an unmapped external table before bill creation', () => {
+  assert.throws(
+    () =>
+      assertCertificationTableAvailable('4', [
+        { external_table_id: '1', active: true },
+        { external_table_id: '2', active: true },
+        { external_table_id: 'EXT-04', active: true },
+      ]),
+    /RESTEC_SANDBOX_EXTERNAL_TABLE_ID=4 is not mapped.*1, 2, EXT-04/,
+  );
+  assert.doesNotThrow(() =>
+    assertCertificationTableAvailable('2', [
+      { external_table_id: '1', active: true },
+      { external_table_id: '2', active: true },
+    ]),
+  );
+});
 
 test('cleanupCertificationBill cancels the existing certification bill at the next version', async () => {
   const calls: Array<{

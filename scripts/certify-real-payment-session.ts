@@ -63,6 +63,26 @@ export const certificationBillBody = (
   },
 });
 
+export function assertCertificationTableAvailable(
+  externalTableId: string,
+  tables: Array<{ external_table_id?: unknown; active?: unknown }>,
+) {
+  const table = tables.find((candidate) => candidate.external_table_id === externalTableId);
+  if (table?.active === true) return;
+  const available = tables
+    .filter(
+      (candidate): candidate is { external_table_id: string; active?: unknown } =>
+        candidate.active === true && typeof candidate.external_table_id === 'string',
+    )
+    .map((candidate) => candidate.external_table_id)
+    .sort();
+  const reason = table ? 'exists but is inactive' : 'is not mapped';
+  throw new Error(
+    `RESTEC_SANDBOX_EXTERNAL_TABLE_ID=${externalTableId} ${reason} for the sandbox location. ` +
+      `Available active external table IDs: ${available.join(', ') || '(none)'}.`,
+  );
+}
+
 export async function cleanupCertificationBill(input: {
   signedRequest: SignedRequest;
   billPath: string;
@@ -315,6 +335,19 @@ export async function main() {
         `Payment-session preflight failed with HTTP ${preflight.status} (${preflightCode}).`,
       );
     }
+
+    const tablesPath = `/v1/locations/${encodeURIComponent(locationId)}/tables`;
+    const tablesResponse = await signedRequest(
+      'GET',
+      tablesPath,
+      undefined,
+      undefined,
+      'table_list',
+    );
+    const tablesBody = (await tablesResponse.json()) as {
+      data?: Array<{ external_table_id?: unknown; active?: unknown }>;
+    };
+    assertCertificationTableAvailable(externalTableId, tablesBody.data ?? []);
   }
 
   let externalBillId = process.env.RESTEC_CERTIFICATION_EXTERNAL_BILL_ID ?? '';
