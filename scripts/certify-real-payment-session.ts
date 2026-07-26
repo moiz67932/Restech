@@ -4,6 +4,180 @@ import { stdin, stdout } from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { signRequest } from '@restec/security';
 
+type SignedRequest = (
+  method: 'PUT' | 'POST' | 'GET',
+  path: string,
+  body?: unknown,
+  idempotencyKey?: string,
+  operation?: string,
+) => Promise<Response>;
+
+export class CertificationHttpError extends Error {
+  constructor(
+    public readonly operation: string,
+    public readonly status: number,
+    public readonly code: string,
+    public readonly requestId: string | undefined,
+    public readonly retryable: boolean | undefined,
+  ) {
+    super(
+      `${operation} failed with HTTP ${status} (` +
+        [code, requestId].filter(Boolean).join(':') +
+        ').',
+    );
+    this.name = 'CertificationHttpError';
+  }
+}
+
+export const certificationBillBody = (
+  externalTableId: string,
+  version: number,
+  cancelled = false,
+) => ({
+  external_table_id: externalTableId,
+  version,
+  currency: 'PKR' as const,
+  status: cancelled ? ('cancelled' as const) : ('open' as const),
+  order_status: cancelled ? ('cancelled' as const) : ('accepted' as const),
+  items: [
+    {
+      external_item_id: 'CERT-ITEM-1',
+      name: 'Sandbox certification item',
+      quantity: 1,
+      unit_amount: 10_000,
+      total_amount: 10_000,
+    },
+  ],
+  totals: {
+    subtotal: 10_000,
+    tax: 0,
+    service_charge: 0,
+    discount: 0,
+    tip: 0,
+    grand_total: 10_000,
+  },
+  occurred_at: new Date().toISOString(),
+  metadata: {
+    certification: true,
+    ...(cancelled ? { cleanup_reason: 'payment_session_creation_failed' } : {}),
+  },
+});
+
+export async function cleanupCertificationBill(input: {
+  signedRequest: SignedRequest;
+  billPath: string;
+  externalBillId: string;
+  externalTableId: string;
+  currentVersion?: number;
+}) {
+  const nextVersion = (input.currentVersion ?? 1) + 1;
+  const suffix = input.externalBillId.replace(/^CERT-/, '');
+  const response = await input.signedRequest(
+    'PUT',
+    input.billPath,
+    certificationBillBody(input.externalTableId, nextVersion, true),
+    `cert-cleanup-${suffix}-v${nextVersion}`,
+    'bill_cleanup',
+  );
+  const body = (await response.json()) as {
+    request_id?: string;
+    external_bill_id?: string;
+    version?: number;
+    order_status?: string;
+  };
+  return {
+    request_id: body.request_id,
+    external_bill_id: body.external_bill_id,
+    version: body.version,
+    order_status: body.order_status,
+  };
+}
+
+const cleanupCommand = (externalBillId: string, currentVersion = 1) =>
+  `$env:RESTEC_CERTIFICATION_EXTERNAL_BILL_ID='${externalBillId}'; ` +
+  `$env:RESTEC_CERTIFICATION_BILL_VERSION='${currentVersion}'; ` +
+  'npm run certify:real-payment-session -- --cleanup';
+
+export async function createPaymentSessionWithCleanup(input: {
+  signedRequest: SignedRequest;
+  createPath: string;
+  createBody: unknown;
+  paymentIdempotencyKey: string;
+  billPath: string;
+  externalBillId: string;
+  externalTableId: string;
+  expectedCheckoutOrigin: string;
+  report?: (message: string) => void;
+}) {
+  const report = input.report ?? console.error;
+  try {
+    const response = await input.signedRequest(
+      'POST',
+      input.createPath,
+      input.createBody,
+      input.paymentIdempotencyKey,
+      'payment_session_create',
+    );
+    const session = (await response.json()) as {
+      payment_session_id?: string;
+      checkout_url?: string;
+      status?: string;
+    };
+    if (
+      session.status !== 'requires_customer_action' ||
+      typeof session.payment_session_id !== 'string' ||
+      typeof session.checkout_url !== 'string'
+    )
+      throw new Error('The payment-session response was incomplete or in an unexpected state.');
+    const checkout = new URL(session.checkout_url);
+    if (checkout.origin !== input.expectedCheckoutOrigin)
+      throw new Error('The API did not return a Restec-origin checkout URL.');
+    return {
+      paymentSessionId: session.payment_session_id,
+      checkout,
+      status: session.status,
+    };
+  } catch (error) {
+    if (error instanceof CertificationHttpError) {
+      report(
+        JSON.stringify({
+          event: 'restec.certification_request_failure',
+          operation: error.operation,
+          dependency: 'restec_public_api',
+          http_status: error.status,
+          error_code: error.code,
+          request_id: error.requestId ?? null,
+          retryable: error.retryable ?? null,
+        }),
+      );
+    }
+    try {
+      const cleanup = await cleanupCertificationBill({
+        signedRequest: input.signedRequest,
+        billPath: input.billPath,
+        externalBillId: input.externalBillId,
+        externalTableId: input.externalTableId,
+      });
+      report(
+        JSON.stringify({
+          event: 'restec.certification_bill_cleanup',
+          result: 'cancelled',
+          ...cleanup,
+        }),
+      );
+    } catch (cleanupError) {
+      report(
+        `Automatic certification bill cleanup failed: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`,
+      );
+      report(`Run this exact cleanup command after resolving the dependency:`);
+      report(cleanupCommand(input.externalBillId));
+    }
+    throw error;
+  }
+}
+
 export async function main() {
   if (process.env.RUN_REAL_PAYMENT_SESSION_CERTIFICATION !== 'true')
     throw new Error(
@@ -22,19 +196,29 @@ export async function main() {
   const apiKey = required('RESTEC_SANDBOX_TEST_API_KEY');
   const signingSecret = required('RESTEC_SANDBOX_REQUEST_SIGNING_SECRET');
   const locationId = required('RESTEC_SANDBOX_LOCATION_ID');
-  const jobToken = required('RESTEC_INTERNAL_JOB_TOKEN');
   const verifyOnly = process.argv.includes('--verify');
+  const cleanupOnly = process.argv.includes('--cleanup');
   const timeoutMs = Number(process.env.RESTEC_CERTIFICATION_TIMEOUT_SECONDS ?? 900) * 1000;
 
-  const failure = async (name: string, response: Response): Promise<never> => {
+  const failure = async (operation: string, response: Response): Promise<never> => {
     let code = 'unknown_error';
+    let requestId: string | undefined;
+    let retryable: boolean | undefined;
     try {
-      const body = (await response.json()) as { error?: { code?: string; request_id?: string } };
-      code = [body.error?.code, body.error?.request_id].filter(Boolean).join(':');
+      const body = (await response.json()) as {
+        error?: {
+          code?: string;
+          request_id?: string;
+          details?: { retryable?: boolean };
+        };
+      };
+      code = body.error?.code ?? code;
+      requestId = body.error?.request_id;
+      retryable = body.error?.details?.retryable;
     } catch {
       // Keep remote response bodies out of certification output.
     }
-    throw new Error(`${name} failed with HTTP ${response.status} (${code}).`);
+    throw new CertificationHttpError(operation, response.status, code, requestId, retryable);
   };
 
   async function signedFetch(
@@ -67,9 +251,10 @@ export async function main() {
     path: string,
     body?: unknown,
     idempotencyKey?: string,
+    operation = path,
   ) {
     const response = await signedFetch(method, path, body, idempotencyKey);
-    if (!response.ok) await failure(path, response);
+    if (!response.ok) await failure(operation, response);
     return response;
   }
 
@@ -78,6 +263,36 @@ export async function main() {
   const healthBody = (await health.json()) as { status?: string; environment?: string };
   if (healthBody.status !== 'ok' || healthBody.environment !== 'sandbox')
     throw new Error('The deployed Restec API is not reporting sandbox health.');
+
+  const externalTableId = process.env.RESTEC_SANDBOX_EXTERNAL_TABLE_ID ?? 'EXT-01';
+  if (cleanupOnly) {
+    const cleanupExternalBillId = required('RESTEC_CERTIFICATION_EXTERNAL_BILL_ID');
+    const currentVersion = Number(process.env.RESTEC_CERTIFICATION_BILL_VERSION ?? 1);
+    if (!Number.isSafeInteger(currentVersion) || currentVersion < 1)
+      throw new Error('RESTEC_CERTIFICATION_BILL_VERSION must be a positive integer.');
+    const cleanupBillPath =
+      `/v1/locations/${encodeURIComponent(locationId)}/bills/` +
+      encodeURIComponent(cleanupExternalBillId);
+    const cleanup = await cleanupCertificationBill({
+      signedRequest,
+      billPath: cleanupBillPath,
+      externalBillId: cleanupExternalBillId,
+      externalTableId,
+      currentVersion,
+    });
+    console.log(
+      JSON.stringify(
+        {
+          event: 'restec.certification_bill_cleanup',
+          result: 'cancelled',
+          ...cleanup,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
 
   if (!verifyOnly) {
     const preflightPath =
@@ -111,62 +326,28 @@ export async function main() {
     const suffix = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     externalBillId = `CERT-${suffix}`;
     const billPath = `/v1/locations/${encodeURIComponent(locationId)}/bills/${encodeURIComponent(externalBillId)}`;
-    await signedRequest(
-      'PUT',
-      billPath,
-      {
-        external_table_id: process.env.RESTEC_SANDBOX_EXTERNAL_TABLE_ID ?? 'EXT-01',
-        version: 1,
-        currency: 'PKR',
-        status: 'open',
-        order_status: 'accepted',
-        items: [
-          {
-            external_item_id: 'CERT-ITEM-1',
-            name: 'Sandbox certification item',
-            quantity: 1,
-            unit_amount: 10_000,
-            total_amount: 10_000,
-          },
-        ],
-        totals: {
-          subtotal: 10_000,
-          tax: 0,
-          service_charge: 0,
-          discount: 0,
-          tip: 0,
-          grand_total: 10_000,
-        },
-        occurred_at: new Date().toISOString(),
-        metadata: { certification: true },
-      },
-      `cert-bill-${suffix}`,
-    );
+    const billBody = certificationBillBody(externalTableId, 1);
+    await signedRequest('PUT', billPath, billBody, `cert-bill-${suffix}`, 'bill_upsert');
     const createPath = `${billPath}/payment-sessions`;
-    const created = await signedRequest(
-      'POST',
+    const created = await createPaymentSessionWithCleanup({
+      signedRequest,
       createPath,
-      {
+      createBody: {
         amount_minor: 10_000,
         currency: 'PKR',
         method: 'card',
         customer: { email: 'sandbox@example.com', mobile: '03000000000' },
         return_context: { pos_reference: `cert-${suffix}` },
       },
-      `cert-payment-${suffix}`,
-    );
-    const session = (await created.json()) as {
-      payment_session_id: string;
-      checkout_url: string;
-      status: string;
-    };
-    if (session.status !== 'requires_customer_action')
-      throw new Error('The initial payment session did not require customer action.');
-    paymentSessionId = session.payment_session_id;
-    initialStatus = session.status;
-    const checkout = new URL(session.checkout_url);
-    if (checkout.origin !== baseUrl.origin)
-      throw new Error('The API did not return a Restec-origin checkout URL.');
+      paymentIdempotencyKey: `cert-payment-${suffix}`,
+      billPath,
+      externalBillId,
+      externalTableId,
+      expectedCheckoutOrigin: baseUrl.origin,
+    });
+    paymentSessionId = created.paymentSessionId;
+    initialStatus = created.status;
+    const checkout = created.checkout;
     checkoutOrigin = checkout.origin;
     console.log(`Restec checkout URL: ${checkout.toString()}`);
     if (!process.argv.includes('--no-wait')) {
@@ -205,6 +386,7 @@ export async function main() {
   }
   if (finalStatus !== 'paid') throw new Error('Timed out waiting for authoritative paid state.');
 
+  const jobToken = required('RESTEC_INTERNAL_JOB_TOKEN');
   const dispatch = await fetch(new URL('/api/internal/jobs/dispatch-pos-events', baseUrl), {
     method: 'POST',
     headers: { Authorization: `Bearer ${jobToken}`, 'Content-Type': 'application/json' },
