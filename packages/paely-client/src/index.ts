@@ -62,7 +62,7 @@ export interface CreatePrivatePaymentSessionInput {
 }
 export interface PrivatePaymentSessionResult {
   privatePaymentSessionId: string;
-  status: 'requires_customer_action' | 'processing';
+  status: 'requires_customer_action';
   providerCheckoutUrl: string;
   amountMinor: number;
   currency: 'PKR';
@@ -78,6 +78,25 @@ export interface PrivatePaymentSessionState {
   paidAt?: string | null;
 }
 export type PrivateDependencyFailureKind = 'http' | 'network' | 'timeout' | 'invalid_response';
+export interface PrivateResponseDiagnostics {
+  downstreamStatus: number;
+  contentType: string | null;
+  topLevelType: string;
+  topLevelKeys: string[];
+  nestedObjectKeys: Array<{ path: string; keys: string[] }>;
+  schemaValidationIssues: Array<{
+    path: string;
+    code: string;
+    expectedType: string;
+    receivedType: string;
+  }>;
+  sessionStatusValue: string | null;
+  checkoutUrlHost: string | null;
+  requiredFieldsPresent: {
+    privatePaymentSessionId: boolean;
+    expiresAt: boolean;
+  };
+}
 export interface PrivateDependencyDiagnostics {
   operation?: string | undefined;
   failureKind?: PrivateDependencyFailureKind | undefined;
@@ -85,6 +104,7 @@ export interface PrivateDependencyDiagnostics {
   downstreamErrorCode?: string | undefined;
   providerRequestId?: string | undefined;
   attempts?: number | undefined;
+  responseDiagnostics?: PrivateResponseDiagnostics | undefined;
 }
 export class PrivateDependencyError extends Error {
   public readonly dependency = 'paely_private_api';
@@ -96,6 +116,7 @@ export class PrivateDependencyError extends Error {
   public readonly downstreamErrorCode: string | undefined;
   public readonly providerRequestId: string | undefined;
   public readonly attempts: number | undefined;
+  public readonly responseDiagnostics: PrivateResponseDiagnostics | undefined;
 
   constructor(retryable: boolean, status: number, diagnostics: PrivateDependencyDiagnostics = {}) {
     super('Private dependency request failed');
@@ -108,8 +129,148 @@ export class PrivateDependencyError extends Error {
     this.downstreamErrorCode = diagnostics.downstreamErrorCode;
     this.providerRequestId = diagnostics.providerRequestId;
     this.attempts = diagnostics.attempts;
+    this.responseDiagnostics = diagnostics.responseDiagnostics;
   }
 }
+interface PrivateSuccessMetadata {
+  downstreamStatus: number;
+  contentType: string | null;
+  downstreamRequestId: string;
+  providerRequestId?: string | undefined;
+  attempts: number;
+}
+const valueType = (value: unknown): string =>
+  value === undefined
+    ? 'missing'
+    : value === null
+      ? 'null'
+      : Array.isArray(value)
+        ? 'array'
+        : typeof value;
+const objectRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+const safeKey = (value: string): string =>
+  /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(value) ? value : '[redacted_key]';
+const safeKeys = (value: Record<string, unknown>): string[] =>
+  Object.keys(value).slice(0, 50).map(safeKey).sort();
+const valueAtPath = (value: unknown, path: Array<string | number>): unknown => {
+  let current = value;
+  for (const segment of path) {
+    if (typeof segment === 'number') {
+      if (!Array.isArray(current)) return undefined;
+      current = current[segment];
+      continue;
+    }
+    const record = objectRecord(current);
+    if (!record) return undefined;
+    current = record[segment];
+  }
+  return current;
+};
+const expectedTypeForIssue = (issue: Record<string, unknown>): string => {
+  if (typeof issue.expected === 'string') return issue.expected;
+  if (issue.code === 'invalid_enum_value' && Array.isArray(issue.options)) return 'enum';
+  if (issue.code === 'unrecognized_keys') return 'strict object without additional fields';
+  if (issue.code === 'invalid_string' && issue.validation === 'datetime') return 'ISO datetime';
+  if (issue.code === 'invalid_string' && issue.validation === 'url') return 'absolute URL';
+  if (issue.code === 'too_small' || issue.code === 'too_big')
+    return typeof issue.type === 'string' ? issue.type : 'value within bounds';
+  return 'valid contract value';
+};
+const issueSummary = (
+  value: unknown,
+  issues: readonly unknown[],
+): PrivateResponseDiagnostics['schemaValidationIssues'] =>
+  issues.map((rawIssue) => {
+    const issue = objectRecord(rawIssue) ?? {};
+    const path = Array.isArray(issue.path)
+      ? issue.path.filter(
+          (segment): segment is string | number =>
+            typeof segment === 'string' || typeof segment === 'number',
+        )
+      : [];
+    return {
+      path: path.length
+        ? path
+            .map((segment) => (typeof segment === 'string' ? safeKey(segment) : segment))
+            .join('.')
+        : '$',
+      code: typeof issue.code === 'string' ? issue.code : 'invalid_value',
+      expectedType: expectedTypeForIssue(issue),
+      receivedType: valueType(valueAtPath(value, path)),
+    };
+  });
+const nestedObjectKeySummary = (value: unknown): PrivateResponseDiagnostics['nestedObjectKeys'] => {
+  const root = objectRecord(value);
+  if (!root) return [];
+  const result: PrivateResponseDiagnostics['nestedObjectKeys'] = [];
+  const visit = (record: Record<string, unknown>, parentPath: string, depth: number) => {
+    for (const [key, value] of Object.entries(record).slice(0, 50)) {
+      const nested = objectRecord(value);
+      if (!nested) continue;
+      const path = parentPath ? `${parentPath}.${safeKey(key)}` : safeKey(key);
+      result.push({ path, keys: safeKeys(nested) });
+      if (depth < 2) visit(nested, path, depth + 1);
+    }
+  };
+  visit(root, '', 1);
+  return result.sort((left, right) => left.path.localeCompare(right.path)).slice(0, 50);
+};
+const checkoutUrlHost = (value: unknown): string | null => {
+  const root = objectRecord(value);
+  if (!root) return null;
+  const records = [
+    root,
+    ...Object.values(root)
+      .map(objectRecord)
+      .filter((entry) => entry !== null),
+  ];
+  for (const record of records) {
+    for (const key of [
+      'providerCheckoutUrl',
+      'provider_checkout_url',
+      'checkoutUrl',
+      'checkout_url',
+    ]) {
+      const candidate = record[key];
+      if (typeof candidate !== 'string') continue;
+      try {
+        return new URL(candidate).hostname.toLowerCase();
+      } catch {
+        return 'invalid_url';
+      }
+    }
+  }
+  return null;
+};
+const responseDiagnostics = (
+  value: unknown,
+  metadata: Pick<PrivateSuccessMetadata, 'downstreamStatus' | 'contentType'>,
+  issues: readonly unknown[],
+): PrivateResponseDiagnostics => {
+  const root = objectRecord(value);
+  return {
+    downstreamStatus: metadata.downstreamStatus,
+    contentType: metadata.contentType?.replace(/[^\x20-\x7e]/g, '').slice(0, 128) ?? null,
+    topLevelType: valueType(value),
+    topLevelKeys: root ? safeKeys(root) : [],
+    nestedObjectKeys: nestedObjectKeySummary(value),
+    schemaValidationIssues: issueSummary(value, issues),
+    sessionStatusValue:
+      typeof root?.status === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(root.status)
+        ? root.status
+        : null,
+    checkoutUrlHost: checkoutUrlHost(value),
+    requiredFieldsPresent: {
+      privatePaymentSessionId:
+        typeof root?.privatePaymentSessionId === 'string' &&
+        root.privatePaymentSessionId.length > 0,
+      expiresAt: typeof root?.expiresAt === 'string' && root.expiresAt.length > 0,
+    },
+  };
+};
 const retryable = new Set([408, 425, 429, 500, 502, 503, 504]);
 const errorMetadata = async (response: Response) => {
   let downstreamErrorCode: string | undefined;
@@ -222,18 +383,58 @@ export class PaelyClient {
     body: CreatePrivatePaymentSessionInput,
     idempotencyKey: string,
   ): Promise<PrivatePaymentSessionResult> {
-    const data = await this.rawRequest(
+    const response = await this.rawRequestDetailed(
       'POST',
       `/api/internal/integrations/restec/v1/locations/${encodeURIComponent(locationId)}/bills/${encodeURIComponent(externalBillId)}/payment-sessions`,
       body,
       idempotencyKey,
       'payment_session_create',
     );
-    const parsed = privatePaymentSessionResponseSchema.safeParse(data);
+    const parsed = privatePaymentSessionResponseSchema.safeParse(response.data);
     if (!parsed.success)
       throw new PrivateDependencyError(false, 502, {
         operation: 'payment_session_create',
         failureKind: 'invalid_response',
+        downstreamRequestId: response.metadata.downstreamRequestId,
+        ...(response.metadata.providerRequestId
+          ? { providerRequestId: response.metadata.providerRequestId }
+          : {}),
+        attempts: response.metadata.attempts,
+        responseDiagnostics: responseDiagnostics(
+          response.data,
+          response.metadata,
+          parsed.error.issues,
+        ),
+      });
+    const semanticIssues: Array<Record<string, unknown>> = [];
+    if (parsed.data.amountMinor !== body.amountMinor)
+      semanticIssues.push({
+        path: ['amountMinor'],
+        code: 'request_value_mismatch',
+        expected: 'request amount integer',
+      });
+    if (parsed.data.currency !== body.currency)
+      semanticIssues.push({
+        path: ['currency'],
+        code: 'request_value_mismatch',
+        expected: 'request currency literal',
+      });
+    if (new Date(parsed.data.expiresAt).getTime() <= Date.now())
+      semanticIssues.push({
+        path: ['expiresAt'],
+        code: 'not_in_future',
+        expected: 'future ISO datetime',
+      });
+    if (semanticIssues.length)
+      throw new PrivateDependencyError(false, 502, {
+        operation: 'payment_session_create',
+        failureKind: 'invalid_response',
+        downstreamRequestId: response.metadata.downstreamRequestId,
+        ...(response.metadata.providerRequestId
+          ? { providerRequestId: response.metadata.providerRequestId }
+          : {}),
+        attempts: response.metadata.attempts,
+        responseDiagnostics: responseDiagnostics(response.data, response.metadata, semanticIssues),
       });
     return parsed.data;
   }
@@ -299,6 +500,15 @@ export class PaelyClient {
     idempotencyKey?: string,
     operation?: string,
   ): Promise<unknown> {
+    return (await this.rawRequestDetailed(method, path, body, idempotencyKey, operation)).data;
+  }
+  private async rawRequestDetailed(
+    method: string,
+    path: string,
+    body?: unknown,
+    idempotencyKey?: string,
+    operation?: string,
+  ): Promise<{ data: unknown; metadata: PrivateSuccessMetadata }> {
     const rawBody = body === undefined ? '' : JSON.stringify(body);
     for (let attempt = 0; attempt < 3; attempt++) {
       const timestamp = Math.floor(Date.now() / 1000);
@@ -329,13 +539,41 @@ export class PaelyClient {
         const response = await this.fetcher(new URL(path, this.config.baseUrl), init);
         if (response.ok) {
           try {
-            return await response.json();
+            return {
+              data: await response.json(),
+              metadata: {
+                downstreamStatus: response.status,
+                contentType: response.headers.get('content-type'),
+                downstreamRequestId: requestId,
+                ...(response.headers.get('x-vercel-id')
+                  ? { providerRequestId: response.headers.get('x-vercel-id')! }
+                  : {}),
+                attempts: attempt + 1,
+              },
+            };
           } catch {
             throw new PrivateDependencyError(false, 502, {
               operation,
               failureKind: 'invalid_response',
               downstreamRequestId: requestId,
+              ...(response.headers.get('x-vercel-id')
+                ? { providerRequestId: response.headers.get('x-vercel-id')! }
+                : {}),
               attempts: attempt + 1,
+              responseDiagnostics: responseDiagnostics(
+                undefined,
+                {
+                  downstreamStatus: response.status,
+                  contentType: response.headers.get('content-type'),
+                },
+                [
+                  {
+                    path: [],
+                    code: 'invalid_json',
+                    expected: 'JSON response body',
+                  },
+                ],
+              ),
             });
           }
         }

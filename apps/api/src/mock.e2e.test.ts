@@ -288,6 +288,27 @@ test('private dependency diagnostics are logged internally while the public 502 
         downstreamRequestId: 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         providerRequestId: 'provider-request-id',
         attempts: 3,
+        responseDiagnostics: {
+          downstreamStatus: 200,
+          contentType: 'application/json; charset=utf-8',
+          topLevelType: 'object',
+          topLevelKeys: ['privatePaymentSessionId', 'status'],
+          nestedObjectKeys: [],
+          schemaValidationIssues: [
+            {
+              path: 'status',
+              code: 'invalid_literal',
+              expectedType: 'requires_customer_action',
+              receivedType: 'string',
+            },
+          ],
+          sessionStatusValue: 'pending',
+          checkoutUrlHost: 'sandbox.api.getsafepay.com',
+          requiredFieldsPresent: {
+            privatePaymentSessionId: true,
+            expiresAt: false,
+          },
+        },
       });
     },
   } as any;
@@ -366,5 +387,22 @@ test('private dependency diagnostics are logged internally while the public 502 
   assert.equal(log.downstream_request_id, 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   assert.equal(log.provider_request_id, 'provider-request-id');
   assert.equal(log.attempts, 3);
+  assert.equal(log.downstream_http_status, 200);
+  assert.equal(log.downstream_content_type, 'application/json; charset=utf-8');
+  assert.deepEqual(log.response_top_level_keys, ['privatePaymentSessionId', 'status']);
+  assert.deepEqual(log.schema_validation_issues, [
+    {
+      path: 'status',
+      code: 'invalid_literal',
+      expectedType: 'requires_customer_action',
+      receivedType: 'string',
+    },
+  ]);
+  assert.equal(log.session_status_value, 'pending');
+  assert.equal(log.checkout_url_host, 'sandbox.api.getsafepay.com');
+  assert.deepEqual(log.required_response_fields_present, {
+    privatePaymentSessionId: true,
+    expiresAt: false,
+  });
   assert(!logs[0]!.includes('private.example'));
 });

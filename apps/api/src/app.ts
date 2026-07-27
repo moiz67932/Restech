@@ -345,16 +345,6 @@ export function createApp(deps: {
           },
           privateKey,
         );
-        if (
-          privateResult.status !== 'requires_customer_action' ||
-          privateResult.amountMinor !== body.amount_minor ||
-          privateResult.currency !== body.currency ||
-          new Date(privateResult.expiresAt).getTime() <= Date.now()
-        )
-          throw new PrivateDependencyError(false, 502, {
-            operation: 'payment_session_create',
-            failureKind: 'invalid_response',
-          });
         let destination: URL;
         try {
           destination = await assertResolvedCheckoutDestination(
@@ -993,6 +983,15 @@ export function createApp(deps: {
           provider_request_id: error.providerRequestId,
           attempts: error.attempts,
           retryable: error.retryable,
+          downstream_http_status: error.responseDiagnostics?.downstreamStatus,
+          downstream_content_type: error.responseDiagnostics?.contentType,
+          response_top_level_type: error.responseDiagnostics?.topLevelType,
+          response_top_level_keys: error.responseDiagnostics?.topLevelKeys,
+          response_nested_object_keys: error.responseDiagnostics?.nestedObjectKeys,
+          schema_validation_issues: error.responseDiagnostics?.schemaValidationIssues,
+          session_status_value: error.responseDiagnostics?.sessionStatusValue,
+          checkout_url_host: error.responseDiagnostics?.checkoutUrlHost,
+          required_response_fields_present: error.responseDiagnostics?.requiredFieldsPresent,
         }),
       );
       return c.json(

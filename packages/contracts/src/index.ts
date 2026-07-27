@@ -120,7 +120,7 @@ export const paymentSessionRequestSchema = z
 export const privatePaymentSessionResponseSchema = z
   .object({
     privatePaymentSessionId: z.string().min(1).max(256),
-    status: z.enum(['requires_customer_action', 'processing']),
+    status: z.literal('requires_customer_action'),
     providerCheckoutUrl: z.string().url().max(4096),
     amountMinor: z.number().int().positive(),
     currency: z.literal('PKR'),

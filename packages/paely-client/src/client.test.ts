@@ -143,6 +143,113 @@ test('payment-session client uses the private contract and deterministic idempot
   );
 });
 
+test('payment-session invalid responses expose only safe contract diagnostics', async () => {
+  const responseBody = {
+    privatePaymentSessionId: 'private-session-secret',
+    status: 'pending',
+    providerCheckoutUrl:
+      'https://sandbox.api.getsafepay.com/order/pay?tracker=tracker-secret-value',
+    amountMinor: 10_000,
+    currency: 'PKR',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    payment: {
+      tracker: 'tracker-secret-value',
+      orderId: 'order-secret-value',
+      paymentId: 'payment-secret-value',
+    },
+  };
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async () =>
+      new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Vercel-Id': 'provider-request-id',
+        },
+      }),
+  });
+
+  await assert.rejects(
+    client.createPaymentSession(
+      '00000000-0000-4000-8000-000000000002',
+      'CERT-sanitized',
+      {
+        connectionId: '00000000-0000-4000-8000-000000000001',
+        amountMinor: 10_000,
+        currency: 'PKR',
+        method: 'card',
+        returnUrls: {
+          success: 'https://api.example/s/rps_test_example/return',
+          cancel: 'https://api.example/s/rps_test_example/cancel',
+        },
+        restecPaymentSessionReference: 'rps_test_example',
+      },
+      'stable-private-key',
+    ),
+    (error: unknown) => {
+      assert(error instanceof PrivateDependencyError);
+      assert.equal(error.status, 502);
+      assert.equal(error.failureKind, 'invalid_response');
+      assert.equal(error.providerRequestId, 'provider-request-id');
+      assert.equal(error.responseDiagnostics?.downstreamStatus, 200);
+      assert.equal(error.responseDiagnostics?.contentType, 'application/json; charset=utf-8');
+      assert.deepEqual(error.responseDiagnostics?.topLevelKeys, [
+        'amountMinor',
+        'currency',
+        'expiresAt',
+        'payment',
+        'privatePaymentSessionId',
+        'providerCheckoutUrl',
+        'status',
+      ]);
+      assert.deepEqual(error.responseDiagnostics?.nestedObjectKeys, [
+        { path: 'payment', keys: ['orderId', 'paymentId', 'tracker'] },
+      ]);
+      assert.deepEqual(
+        error.responseDiagnostics?.schemaValidationIssues.map((issue) => ({
+          path: issue.path,
+          code: issue.code,
+          expectedType: issue.expectedType,
+          receivedType: issue.receivedType,
+        })),
+        [
+          {
+            path: 'status',
+            code: 'invalid_literal',
+            expectedType: 'requires_customer_action',
+            receivedType: 'string',
+          },
+          {
+            path: '$',
+            code: 'unrecognized_keys',
+            expectedType: 'strict object without additional fields',
+            receivedType: 'object',
+          },
+        ],
+      );
+      assert.equal(error.responseDiagnostics?.sessionStatusValue, 'pending');
+      assert.equal(error.responseDiagnostics?.checkoutUrlHost, 'sandbox.api.getsafepay.com');
+      assert.deepEqual(error.responseDiagnostics?.requiredFieldsPresent, {
+        privatePaymentSessionId: true,
+        expiresAt: true,
+      });
+      const serialized = JSON.stringify(error);
+      assert(!serialized.includes('private-session-secret'));
+      assert(!serialized.includes('tracker-secret-value'));
+      assert(!serialized.includes('order-secret-value'));
+      assert(!serialized.includes('payment-secret-value'));
+      assert(!serialized.includes('/order/pay'));
+      return true;
+    },
+  );
+});
+
 test('private client consumes and classifies a Paely Vercel invocation failure', async () => {
   const responses: Response[] = [];
   let attempt = 0;

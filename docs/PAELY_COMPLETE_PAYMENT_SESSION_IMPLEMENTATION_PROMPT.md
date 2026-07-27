@@ -1744,3 +1744,19 @@ Do not deploy automatically. Do not access production. Do not change production 
 variables. Do not rotate secrets. Do not expose secret values. Do not modify Restec. Do not accept
 card data. Do not call Restec public APIs. Do not claim success until a real Safepay sandbox
 webhook and complete Restec-to-POS delivery are verified.
+
+
+$BaseUrl = "https://paely-sandbox.vercel.app"
+$VenueId = "10000000-0000-4000-8000-000000000001"
+
+function Read-SecretText([string]$Prompt) {
+    $secure = Read-Host $Prompt -AsSecureString
+    return ([System.Net.NetworkCredential]::new("", $secure)).Password
+}
+
+$AdminToken = Read-SecretText "qDyAJGXJMZWG9F_wZB7356P7fse3jW6nwz1Trm4_mYT_pjsx0jabIMUHDn0LQ4_x"
+$SafepayPublicKey = Read-SecretText "sec_edeeec49-06be-4171-b40a-5c701a61847b"
+$SafepaySecretKey = Read-SecretText "7580163455f2cbeaaac6c00984ad025dd0ebb494c15beac4752130016afdc83d"
+$SafepayWebhookSecret = Read-SecretText "d48f304217ad4f265d9182c20e713604f061f7c2bdf124585c2924ae0170fa98"
+
+
