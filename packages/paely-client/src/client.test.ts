@@ -143,6 +143,177 @@ test('payment-session client uses the private contract and deterministic idempot
   );
 });
 
+test('payment-session refresh signs an empty JSON object and sends no idempotency key', async () => {
+  let captured: Request | undefined;
+  const privatePaymentSessionId = 'pps_existing_session';
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async (input, init) => {
+      captured = new Request(input, init);
+      return new Response(
+        JSON.stringify({
+          privatePaymentSessionId,
+          status: 'requires_customer_action',
+          providerCheckoutUrl: 'https://checkout.example/opaque-fresh-token',
+          amountMinor: 10_000,
+          currency: 'PKR',
+          expiresAt,
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Vercel-Id': 'provider-refresh-request',
+          },
+        },
+      );
+    },
+  });
+
+  const result = await client.refreshPaymentSession({
+    privatePaymentSessionId,
+    amountMinor: 10_000,
+    currency: 'PKR',
+  });
+
+  assert.equal(result.privatePaymentSessionId, privatePaymentSessionId);
+  assert.equal(
+    new URL(captured!.url).pathname,
+    `/api/internal/integrations/restec/v1/payment-sessions/${privatePaymentSessionId}/refresh`,
+  );
+  assert.equal(captured!.method, 'POST');
+  assert.equal(captured!.headers.get('Idempotency-Key'), null);
+  assert.equal(captured!.headers.get('X-Restec-Environment'), 'sandbox');
+  assert.equal(captured!.headers.get('X-Restec-Service-Id'), 'service');
+  assert.equal(captured!.headers.get('Authorization'), 'Bearer token');
+  const rawBody = await captured!.clone().text();
+  assert.equal(rawBody, '{}');
+  assert(
+    verifyRequestSignature({
+      secret: 'secret',
+      signature: captured!.headers.get('X-Restec-Signature')!,
+      timestamp: Number(captured!.headers.get('X-Restec-Timestamp')),
+      method: 'POST',
+      path: new URL(captured!.url).pathname,
+      rawBody,
+    }),
+  );
+});
+
+test('payment-session refresh rejects a mismatched private identity without leaking it', async () => {
+  const client = new PaelyClient({
+    baseUrl: 'https://private.example',
+    bearerToken: 'token',
+    serviceId: 'service',
+    environment: 'sandbox',
+    signingSecret: 'secret',
+    timeoutMs: 1000,
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          privatePaymentSessionId: 'different-private-secret',
+          status: 'requires_customer_action',
+          providerCheckoutUrl: 'https://checkout.example/opaque-fresh-token',
+          amountMinor: 10_000,
+          currency: 'PKR',
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+  });
+
+  await assert.rejects(
+    client.refreshPaymentSession({
+      privatePaymentSessionId: 'expected-private-secret',
+      amountMinor: 10_000,
+      currency: 'PKR',
+    }),
+    (error: unknown) => {
+      assert(error instanceof PrivateDependencyError);
+      assert.equal(error.operation, 'payment_session_refresh');
+      assert.equal(error.failureKind, 'invalid_response');
+      assert.deepEqual(error.responseDiagnostics?.schemaValidationIssues, [
+        {
+          path: 'privatePaymentSessionId',
+          code: 'identity_mismatch',
+          expectedType: 'stored private payment-session identity',
+          receivedType: 'string',
+        },
+      ]);
+      const diagnostics = JSON.stringify(error.responseDiagnostics);
+      assert(!diagnostics.includes('different-private-secret'));
+      assert(!diagnostics.includes('expected-private-secret'));
+      assert(!diagnostics.includes('opaque-fresh-token'));
+      return true;
+    },
+  );
+});
+
+test('payment-session refresh strictly validates amount, expiry, and HTTPS', async () => {
+  const cases = [
+    {
+      name: 'amount',
+      override: { amountMinor: 9_999 },
+      expectedPath: 'amountMinor',
+    },
+    {
+      name: 'expiry',
+      override: { expiresAt: new Date(Date.now() - 60_000).toISOString() },
+      expectedPath: 'expiresAt',
+    },
+    {
+      name: 'protocol',
+      override: { providerCheckoutUrl: 'http://checkout.example/opaque-token' },
+      expectedPath: 'providerCheckoutUrl',
+    },
+  ] as const;
+  for (const testCase of cases) {
+    const client = new PaelyClient({
+      baseUrl: 'https://private.example',
+      bearerToken: 'token',
+      serviceId: 'service',
+      environment: 'sandbox',
+      signingSecret: 'secret',
+      timeoutMs: 1000,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            privatePaymentSessionId: 'pps_existing_session',
+            status: 'requires_customer_action',
+            providerCheckoutUrl: 'https://checkout.example/opaque-token',
+            amountMinor: 10_000,
+            currency: 'PKR',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            ...testCase.override,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    });
+    await assert.rejects(
+      client.refreshPaymentSession({
+        privatePaymentSessionId: 'pps_existing_session',
+        amountMinor: 10_000,
+        currency: 'PKR',
+      }),
+      (error: unknown) => {
+        assert(error instanceof PrivateDependencyError, testCase.name);
+        assert.equal(
+          error.responseDiagnostics?.schemaValidationIssues[0]?.path,
+          testCase.expectedPath,
+          testCase.name,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test('payment-session invalid responses expose only safe contract diagnostics', async () => {
   const responseBody = {
     privatePaymentSessionId: 'private-session-secret',

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { signEvent, signRequest } from '@restec/security';
+import { decryptSecret, signEvent, signRequest } from '@restec/security';
+import { PrivateDependencyError } from '@restec/paely-client';
 import type { Config } from './config.js';
 import { createApp } from './app.js';
 import { MemoryRepository } from './memory-repository.js';
@@ -41,6 +43,18 @@ const webhookSecret = 'webhook-secret';
 
 function fixture(
   createOverride?: () => Promise<{
+    privatePaymentSessionId: string;
+    status: 'requires_customer_action';
+    providerCheckoutUrl: string;
+    amountMinor: number;
+    currency: 'PKR';
+    expiresAt: string;
+  }>,
+  refreshOverride?: (expected: {
+    privatePaymentSessionId: string;
+    amountMinor: number;
+    currency: 'PKR';
+  }) => Promise<{
     privatePaymentSessionId: string;
     status: 'requires_customer_action';
     providerCheckoutUrl: string;
@@ -91,6 +105,7 @@ function fixture(
     updated_at: new Date().toISOString(),
   });
   let privateCalls = 0;
+  let refreshCalls = 0;
   const privateClient = {
     async createPaymentSession() {
       privateCalls++;
@@ -98,9 +113,27 @@ function fixture(
       return {
         privatePaymentSessionId: 'private-session-hidden',
         status: 'requires_customer_action',
-        providerCheckoutUrl: 'https://checkout.example/hosted/token-hidden',
+        providerCheckoutUrl:
+          'https://checkout.example/hosted?tracker=existing-tracker&token=expired-token',
         amountMinor: 10_000,
         currency: 'PKR',
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      };
+    },
+    async refreshPaymentSession(expected: {
+      privatePaymentSessionId: string;
+      amountMinor: number;
+      currency: 'PKR';
+    }) {
+      refreshCalls++;
+      if (refreshOverride) return refreshOverride(expected);
+      return {
+        privatePaymentSessionId: expected.privatePaymentSessionId,
+        status: 'requires_customer_action',
+        providerCheckoutUrl:
+          'https://checkout.example/hosted?tracker=existing-tracker&token=fresh-token',
+        amountMinor: expected.amountMinor,
+        currency: expected.currency,
         expiresAt: new Date(Date.now() + 600_000).toISOString(),
       };
     },
@@ -113,7 +146,12 @@ function fixture(
     internalJobToken: 'job-secret',
     checkoutLookup: async () => [{ address: '93.184.216.34', family: 4 }],
   });
-  return { app, repo, privateCalls: () => privateCalls };
+  return {
+    app,
+    repo,
+    privateCalls: () => privateCalls,
+    refreshCalls: () => refreshCalls,
+  };
 }
 
 const signed = (path: string, method: string, body = '', requestId = `req_${Date.now()}`) => {
@@ -128,8 +166,26 @@ const signed = (path: string, method: string, body = '', requestId = `req_${Date
   };
 };
 
-test('payment session is Restec-only, encrypted at rest, idempotent, and redirects safely', async () => {
-  const { app, repo, privateCalls } = fixture();
+async function createHostedPaymentSession(
+  app: ReturnType<typeof createApp>,
+  key: string,
+): Promise<string> {
+  const path = '/v1/locations/loc_test/bills/BILL-1/payment-sessions';
+  const body = JSON.stringify({ amount_minor: 10_000, currency: 'PKR', method: 'card' });
+  const response = await app.request(path, {
+    method: 'POST',
+    headers: {
+      ...signed(path, 'POST', body, `req_create_${key.replaceAll('-', '_')}`),
+      'Idempotency-Key': key,
+    },
+    body,
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  return ((await response.json()) as { payment_session_id: string }).payment_session_id;
+}
+
+test('payment session is Restec-only, encrypted at rest, idempotent, and refreshes before redirect', async () => {
+  const { app, repo, privateCalls, refreshCalls } = fixture();
   const path = '/v1/locations/loc_test/bills/BILL-1/payment-sessions';
   const body = JSON.stringify({
     amount_minor: 10_000,
@@ -176,8 +232,158 @@ test('payment session is Restec-only, encrypted at rest, idempotent, and redirec
     redirect: 'manual',
   });
   assert.equal(redirect.status, 303);
-  assert.equal(redirect.headers.get('location'), 'https://checkout.example/hosted/token-hidden');
+  assert.equal(
+    redirect.headers.get('location'),
+    'https://checkout.example/hosted?tracker=existing-tracker&token=fresh-token',
+  );
   assert.match(redirect.headers.get('cache-control') ?? '', /no-store/);
+  assert.equal(privateCalls(), 1);
+  assert.equal(refreshCalls(), 1);
+  const refreshed = await repo.getPaymentSession(response.payment_session_id);
+  assert(refreshed?.encryptedProviderCheckoutUrl);
+  assert.equal(
+    decryptSecret(
+      refreshed.encryptedProviderCheckoutUrl,
+      enabledConfig.RESTEC_SECRET_ENCRYPTION_KEY,
+    ),
+    'https://checkout.example/hosted?tracker=existing-tracker&token=fresh-token',
+  );
+  assert.equal(refreshed.providerCheckoutHost, 'checkout.example');
+  assert.equal(redirect.headers.get('location')?.includes('expired-token'), false);
+});
+
+test('checkout refresh rejects an invalid host and never falls back to the original URL', async () => {
+  const { app, repo, refreshCalls } = fixture(undefined, async (expected) => ({
+    privatePaymentSessionId: expected.privatePaymentSessionId,
+    status: 'requires_customer_action',
+    providerCheckoutUrl: 'https://unapproved.example/hosted?token=fresh-secret',
+    amountMinor: expected.amountMinor,
+    currency: expected.currency,
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  }));
+  const publicId = await createHostedPaymentSession(app, 'pay-invalid-host');
+  const before = await repo.getPaymentSession(publicId);
+
+  const redirect = await app.request(`/s/${publicId}`, { redirect: 'manual' });
+
+  assert.equal(redirect.status, 502);
+  assert.equal(redirect.headers.get('location'), null);
+  const error = (await redirect.json()) as {
+    error: { code: string; details: { retryable: boolean } };
+  };
+  assert.equal(error.error.code, 'invalid_checkout_destination');
+  assert.equal(error.error.details.retryable, false);
+  assert.equal(refreshCalls(), 1);
+  const after = await repo.getPaymentSession(publicId);
+  assert.equal(after?.encryptedProviderCheckoutUrl, before?.encryptedProviderCheckoutUrl);
+  assert.equal(repo.paymentSessionCheckoutRefreshLeases.has(publicId), false);
+});
+
+test('Paely refresh failure is safely classified, logged without secrets, and never redirects', async () => {
+  const oldCapability = 'expired-token';
+  const tracker = 'existing-tracker';
+  const { app, repo, refreshCalls } = fixture(undefined, async () => {
+    throw new PrivateDependencyError(true, 503, {
+      operation: 'payment_session_refresh',
+      failureKind: 'http',
+      downstreamRequestId: 'req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      providerRequestId: 'provider-refresh-request',
+      attempts: 3,
+    });
+  });
+  const publicId = await createHostedPaymentSession(app, 'pay-refresh-failure');
+  const before = await repo.getPaymentSession(publicId);
+  const logs: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]) => logs.push(values.map(String).join(' '));
+  let redirect: Response;
+  try {
+    redirect = await app.request(`/s/${publicId}`, { redirect: 'manual' });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(redirect.status, 503);
+  assert.equal(redirect.headers.get('location'), null);
+  const body = (await redirect.json()) as {
+    error: { code: string; details: { retryable: boolean } };
+  };
+  assert.equal(body.error.code, 'dependency_unavailable');
+  assert.equal(body.error.details.retryable, true);
+  assert.equal(refreshCalls(), 1);
+  assert.equal(
+    (await repo.getPaymentSession(publicId))?.encryptedProviderCheckoutUrl,
+    before?.encryptedProviderCheckoutUrl,
+  );
+  assert.equal(repo.paymentSessionCheckoutRefreshLeases.has(publicId), false);
+  assert.equal(logs.length, 1);
+  assert(logs[0]!.includes('payment_session_refresh'));
+  assert(!logs[0]!.includes(oldCapability));
+  assert(!logs[0]!.includes(tracker));
+  assert(!logs[0]!.includes('private-session-hidden'));
+});
+
+test('concurrent checkout redirects make one refresh call and never overwrite each other', async () => {
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => (entered = resolve));
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const { app, refreshCalls, privateCalls } = fixture(undefined, async (expected) => {
+    entered();
+    await gate;
+    return {
+      privatePaymentSessionId: expected.privatePaymentSessionId,
+      status: 'requires_customer_action',
+      providerCheckoutUrl:
+        'https://checkout.example/hosted?tracker=existing-tracker&token=concurrent-fresh',
+      amountMinor: expected.amountMinor,
+      currency: expected.currency,
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    };
+  });
+  const publicId = await createHostedPaymentSession(app, 'pay-concurrent-refresh');
+
+  const firstPromise = app.request(`/s/${publicId}`, { redirect: 'manual' });
+  await started;
+  const second = await app.request(`/s/${publicId}`, { redirect: 'manual' });
+
+  assert.equal(second.status, 503);
+  assert.equal(second.headers.get('location'), null);
+  assert.equal(
+    ((await second.json()) as { error: { details: { retryable: boolean } } }).error.details
+      .retryable,
+    true,
+  );
+  assert.equal(refreshCalls(), 1);
+  assert.equal(privateCalls(), 1);
+  release();
+  const first = await firstPromise;
+  assert.equal(first.status, 303);
+  assert.equal(
+    first.headers.get('location'),
+    'https://checkout.example/hosted?tracker=existing-tracker&token=concurrent-fresh',
+  );
+});
+
+test('checkout refresh lease migration serializes URL replacement without financial writes', () => {
+  const migration = readFileSync(
+    new URL(
+      '../../../supabase/migrations/20260727000100_payment_session_checkout_refresh.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(migration, /claim_payment_session_checkout_refresh/);
+  assert.match(migration, /complete_payment_session_checkout_refresh/);
+  assert.match(migration, /release_payment_session_checkout_refresh/);
+  assert.match(migration, /checkout_refresh_lock_token = p_lock_token/);
+  assert.match(
+    migration,
+    /private_payment_session_reference = p_private_payment_session_reference/,
+  );
+  assert.match(migration, /encrypted_provider_checkout_url = p_encrypted_provider_checkout_url/);
+  assert.doesNotMatch(migration, /insert\s+into\s+public\.(?:payments|bill_mappings)/i);
+  assert.doesNotMatch(migration, /delete\s+from/i);
 });
 
 test('concurrent duplicate creation makes one private call', async () => {

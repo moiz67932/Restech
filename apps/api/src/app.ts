@@ -10,13 +10,7 @@ import {
 } from '@restec/contracts';
 import { derivePrivateIdempotencyKey, type PaelyClient } from '@restec/paely-client';
 import { PrivateDependencyError } from '@restec/paely-client';
-import {
-  decryptSecret,
-  encryptSecret,
-  sha256,
-  verifyEventSignature,
-  verifyTimestamp,
-} from '@restec/security';
+import { encryptSecret, sha256, verifyEventSignature, verifyTimestamp } from '@restec/security';
 import { ConnectorRegistry } from '@restec/connector-registry';
 import { assertSafeWebhookUrl, retryDelaySeconds } from '@restec/webhook-delivery';
 import type { RateLimiter } from '@restec/rate-limiting';
@@ -513,48 +507,91 @@ export function createApp(deps: {
         );
       throw new ApiError(410, 'payment_session_expired', 'The payment session has expired.');
     }
-    if (!['requires_customer_action', 'processing'].includes(session.status))
+    if (session.status !== 'requires_customer_action')
       throw new ApiError(
         409,
         'payment_session_already_completed',
         'The payment session is no longer available for customer action.',
       );
-    if (!session.encryptedProviderCheckoutUrl || !session.providerCheckoutHost)
+    if (!session.privatePaymentSessionReference)
       throw new ApiError(
         503,
         'dependency_unavailable',
         'The hosted payment page is temporarily unavailable.',
+        { retryable: false },
       );
-    let destination: URL;
+    const refreshLockToken = randomUUID();
+    const refreshLeaseSeconds = Math.min(
+      120,
+      Math.max(5, Math.ceil((deps.config.RESTEC_PRIVATE_REQUEST_TIMEOUT_MS * 3) / 1000) + 5),
+    );
+    const claimed = await deps.repository.claimPaymentSessionCheckoutRefresh(
+      session.publicPaymentSessionId,
+      refreshLockToken,
+      refreshLeaseSeconds,
+    );
+    if (!claimed)
+      throw new ApiError(
+        503,
+        'dependency_unavailable',
+        'The hosted payment page is being refreshed. Please retry.',
+        { retryable: true },
+      );
     try {
-      destination = await assertResolvedCheckoutDestination(
-        decryptSecret(
-          session.encryptedProviderCheckoutUrl,
+      const refreshed = await deps.privateClient.refreshPaymentSession({
+        privatePaymentSessionId: claimed.privatePaymentSessionReference!,
+        amountMinor: claimed.amountMinor,
+        currency: claimed.currency,
+      });
+      let destination: URL;
+      try {
+        destination = await assertResolvedCheckoutDestination(
+          refreshed.providerCheckoutUrl,
+          checkoutHosts,
+          deps.checkoutLookup,
+        );
+      } catch {
+        throw new ApiError(
+          502,
+          'invalid_checkout_destination',
+          'The hosted payment destination is unavailable.',
+          { retryable: false },
+        );
+      }
+      const persisted = await deps.repository.completePaymentSessionCheckoutRefresh({
+        publicPaymentSessionId: claimed.publicPaymentSessionId,
+        privatePaymentSessionReference: claimed.privatePaymentSessionReference!,
+        lockToken: refreshLockToken,
+        encryptedProviderCheckoutUrl: encryptSecret(
+          refreshed.providerCheckoutUrl,
           deps.config.RESTEC_SECRET_ENCRYPTION_KEY,
         ),
-        checkoutHosts,
-        deps.checkoutLookup,
-      );
-      if (destination.hostname.toLowerCase() !== session.providerCheckoutHost)
-        throw new Error('host_mismatch');
-    } catch {
-      throw new ApiError(
-        502,
-        'invalid_checkout_destination',
-        'The hosted payment destination is unavailable.',
-      );
+        providerCheckoutHost: destination.hostname.toLowerCase(),
+      });
+      if (!persisted)
+        throw new ApiError(
+          503,
+          'dependency_unavailable',
+          'The hosted payment page could not be refreshed. Please retry.',
+          { retryable: true },
+        );
+      await deps.repository.createAuditLog({
+        actorType: 'customer',
+        partnerId: claimed.partnerId,
+        connectionId: claimed.connectionId,
+        action: 'payment_session.checkout_refreshed_and_redirected',
+        result: 'accepted',
+        targetType: 'payment_session',
+        targetId: claimed.publicPaymentSessionId,
+        metadata: { environment: deploymentEnvironment },
+      });
+      return c.redirect(destination.toString(), 303);
+    } catch (error) {
+      await deps.repository
+        .releasePaymentSessionCheckoutRefresh(session.publicPaymentSessionId, refreshLockToken)
+        .catch(() => undefined);
+      throw error;
     }
-    await deps.repository.createAuditLog({
-      actorType: 'customer',
-      partnerId: session.partnerId,
-      connectionId: session.connectionId,
-      action: 'payment_session.checkout_redirected',
-      result: 'accepted',
-      targetType: 'payment_session',
-      targetId: session.publicPaymentSessionId,
-      metadata: { environment: deploymentEnvironment },
-    });
-    return c.redirect(destination.toString(), 303);
   });
   app.get('/s/:paymentSessionId/return', async (c) => {
     const session = await browserPaymentSession(c.req.param('paymentSessionId'));

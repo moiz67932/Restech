@@ -177,6 +177,13 @@ export interface AttachPaymentSessionInput {
   status: 'requires_customer_action' | 'processing';
   expiresAt: string;
 }
+export interface CompletePaymentSessionCheckoutRefreshInput {
+  publicPaymentSessionId: string;
+  privatePaymentSessionReference: string;
+  lockToken: string;
+  encryptedProviderCheckoutUrl: string;
+  providerCheckoutHost: string;
+}
 export interface PaymentSessionEventInput extends PrivateEventInput {
   publicPaymentSessionId: string;
   requestedStatus: PaymentSessionStatus;
@@ -281,6 +288,18 @@ export interface RestecRepository {
     input: CreatePaymentSessionInput,
   ): Promise<{ record: PaymentSessionRecord; created: boolean }>;
   attachPaymentSession(input: AttachPaymentSessionInput): Promise<PaymentSessionRecord>;
+  claimPaymentSessionCheckoutRefresh(
+    publicPaymentSessionId: string,
+    lockToken: string,
+    leaseSeconds: number,
+  ): Promise<PaymentSessionRecord | null>;
+  completePaymentSessionCheckoutRefresh(
+    input: CompletePaymentSessionCheckoutRefreshInput,
+  ): Promise<PaymentSessionRecord | null>;
+  releasePaymentSessionCheckoutRefresh(
+    publicPaymentSessionId: string,
+    lockToken: string,
+  ): Promise<void>;
   getPaymentSession(publicPaymentSessionId: string): Promise<PaymentSessionRecord | null>;
   transitionPaymentSession(
     publicPaymentSessionId: string,

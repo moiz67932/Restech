@@ -68,6 +68,11 @@ export interface PrivatePaymentSessionResult {
   currency: 'PKR';
   expiresAt: string;
 }
+export interface RefreshPrivatePaymentSessionExpectation {
+  privatePaymentSessionId: string;
+  amountMinor: number;
+  currency: 'PKR';
+}
 export interface PrivatePaymentSessionState {
   privatePaymentSessionId: string;
   restecPaymentSessionReference?: string;
@@ -390,30 +395,57 @@ export class PaelyClient {
       idempotencyKey,
       'payment_session_create',
     );
+    return this.validatePaymentSessionResponse(response, 'payment_session_create', {
+      amountMinor: body.amountMinor,
+      currency: body.currency,
+      requireHttps: false,
+    });
+  }
+  async refreshPaymentSession(
+    expected: RefreshPrivatePaymentSessionExpectation,
+  ): Promise<PrivatePaymentSessionResult> {
+    const response = await this.rawRequestDetailed(
+      'POST',
+      `/api/internal/integrations/restec/v1/payment-sessions/${encodeURIComponent(expected.privatePaymentSessionId)}/refresh`,
+      {},
+      undefined,
+      'payment_session_refresh',
+    );
+    return this.validatePaymentSessionResponse(response, 'payment_session_refresh', {
+      ...expected,
+      requireHttps: true,
+    });
+  }
+  private validatePaymentSessionResponse(
+    response: { data: unknown; metadata: PrivateSuccessMetadata },
+    operation: 'payment_session_create' | 'payment_session_refresh',
+    expected: {
+      privatePaymentSessionId?: string;
+      amountMinor: number;
+      currency: 'PKR';
+      requireHttps: boolean;
+    },
+  ): PrivatePaymentSessionResult {
     const parsed = privatePaymentSessionResponseSchema.safeParse(response.data);
     if (!parsed.success)
-      throw new PrivateDependencyError(false, 502, {
-        operation: 'payment_session_create',
-        failureKind: 'invalid_response',
-        downstreamRequestId: response.metadata.downstreamRequestId,
-        ...(response.metadata.providerRequestId
-          ? { providerRequestId: response.metadata.providerRequestId }
-          : {}),
-        attempts: response.metadata.attempts,
-        responseDiagnostics: responseDiagnostics(
-          response.data,
-          response.metadata,
-          parsed.error.issues,
-        ),
-      });
+      this.throwInvalidPaymentSessionResponse(response, operation, parsed.error.issues);
     const semanticIssues: Array<Record<string, unknown>> = [];
-    if (parsed.data.amountMinor !== body.amountMinor)
+    if (
+      expected.privatePaymentSessionId &&
+      parsed.data.privatePaymentSessionId !== expected.privatePaymentSessionId
+    )
+      semanticIssues.push({
+        path: ['privatePaymentSessionId'],
+        code: 'identity_mismatch',
+        expected: 'stored private payment-session identity',
+      });
+    if (parsed.data.amountMinor !== expected.amountMinor)
       semanticIssues.push({
         path: ['amountMinor'],
         code: 'request_value_mismatch',
         expected: 'request amount integer',
       });
-    if (parsed.data.currency !== body.currency)
+    if (parsed.data.currency !== expected.currency)
       semanticIssues.push({
         path: ['currency'],
         code: 'request_value_mismatch',
@@ -425,18 +457,31 @@ export class PaelyClient {
         code: 'not_in_future',
         expected: 'future ISO datetime',
       });
-    if (semanticIssues.length)
-      throw new PrivateDependencyError(false, 502, {
-        operation: 'payment_session_create',
-        failureKind: 'invalid_response',
-        downstreamRequestId: response.metadata.downstreamRequestId,
-        ...(response.metadata.providerRequestId
-          ? { providerRequestId: response.metadata.providerRequestId }
-          : {}),
-        attempts: response.metadata.attempts,
-        responseDiagnostics: responseDiagnostics(response.data, response.metadata, semanticIssues),
+    if (expected.requireHttps && new URL(parsed.data.providerCheckoutUrl).protocol !== 'https:')
+      semanticIssues.push({
+        path: ['providerCheckoutUrl'],
+        code: 'invalid_protocol',
+        expected: 'HTTPS URL',
       });
+    if (semanticIssues.length)
+      this.throwInvalidPaymentSessionResponse(response, operation, semanticIssues);
     return parsed.data;
+  }
+  private throwInvalidPaymentSessionResponse(
+    response: { data: unknown; metadata: PrivateSuccessMetadata },
+    operation: 'payment_session_create' | 'payment_session_refresh',
+    issues: readonly unknown[],
+  ): never {
+    throw new PrivateDependencyError(false, 502, {
+      operation,
+      failureKind: 'invalid_response',
+      downstreamRequestId: response.metadata.downstreamRequestId,
+      ...(response.metadata.providerRequestId
+        ? { providerRequestId: response.metadata.providerRequestId }
+        : {}),
+      attempts: response.metadata.attempts,
+      responseDiagnostics: responseDiagnostics(response.data, response.metadata, issues),
+    });
   }
   async getPaymentSession(privatePaymentSessionId: string): Promise<PrivatePaymentSessionState> {
     const data = (await this.rawRequest(

@@ -12,6 +12,7 @@ import type {
   PaymentSessionRecord,
   CreatePaymentSessionInput,
   AttachPaymentSessionInput,
+  CompletePaymentSessionCheckoutRefreshInput,
   PaymentSessionEventInput,
   MockPosReceipt,
   RestecRepository,
@@ -42,6 +43,7 @@ export class MemoryRepository implements RestecRepository {
   attempts: DeliveryAttempt[] = [];
   audits: AuditInput[] = [];
   paymentSessions = new Map<string, PaymentSessionRecord>();
+  paymentSessionCheckoutRefreshLeases = new Map<string, { lockToken: string; expiresAt: number }>();
   mockPosReceipts = new Map<string, MockPosReceipt>();
   async authenticateApiKey(key: string, environment: Environment) {
     const value = this.credentials.get(key);
@@ -435,6 +437,52 @@ export class MemoryRepository implements RestecRepository {
     };
     this.paymentSessions.set(record.publicPaymentSessionId, record);
     return record;
+  }
+  async claimPaymentSessionCheckoutRefresh(
+    publicPaymentSessionId: string,
+    lockToken: string,
+    leaseSeconds: number,
+  ) {
+    const record = this.paymentSessions.get(publicPaymentSessionId);
+    const existingLease = this.paymentSessionCheckoutRefreshLeases.get(publicPaymentSessionId);
+    if (
+      !record ||
+      record.status !== 'requires_customer_action' ||
+      !record.privatePaymentSessionReference ||
+      new Date(record.expiresAt).getTime() <= Date.now() ||
+      (existingLease && existingLease.expiresAt > Date.now())
+    )
+      return null;
+    this.paymentSessionCheckoutRefreshLeases.set(publicPaymentSessionId, {
+      lockToken,
+      expiresAt: Date.now() + leaseSeconds * 1000,
+    });
+    return record;
+  }
+  async completePaymentSessionCheckoutRefresh(input: CompletePaymentSessionCheckoutRefreshInput) {
+    const record = this.paymentSessions.get(input.publicPaymentSessionId);
+    const lease = this.paymentSessionCheckoutRefreshLeases.get(input.publicPaymentSessionId);
+    if (
+      !record ||
+      record.status !== 'requires_customer_action' ||
+      record.privatePaymentSessionReference !== input.privatePaymentSessionReference ||
+      lease?.lockToken !== input.lockToken
+    )
+      return null;
+    const refreshed: PaymentSessionRecord = {
+      ...record,
+      encryptedProviderCheckoutUrl: input.encryptedProviderCheckoutUrl,
+      providerCheckoutHost: input.providerCheckoutHost,
+      updatedAt: new Date().toISOString(),
+    };
+    this.paymentSessions.set(input.publicPaymentSessionId, refreshed);
+    this.paymentSessionCheckoutRefreshLeases.delete(input.publicPaymentSessionId);
+    return refreshed;
+  }
+  async releasePaymentSessionCheckoutRefresh(publicPaymentSessionId: string, lockToken: string) {
+    const lease = this.paymentSessionCheckoutRefreshLeases.get(publicPaymentSessionId);
+    if (lease?.lockToken === lockToken)
+      this.paymentSessionCheckoutRefreshLeases.delete(publicPaymentSessionId);
   }
   async getPaymentSession(publicPaymentSessionId: string) {
     return this.paymentSessions.get(publicPaymentSessionId) ?? null;

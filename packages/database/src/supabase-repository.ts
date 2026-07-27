@@ -14,6 +14,7 @@ import type {
   PaymentSessionRecord,
   CreatePaymentSessionInput,
   AttachPaymentSessionInput,
+  CompletePaymentSessionCheckoutRefreshInput,
   PaymentSessionEventInput,
   MockPosReceipt,
   RestecRepository,
@@ -776,6 +777,37 @@ export class SupabaseRepository implements RestecRepository {
     dbError(error);
     if (!data) throw new RepositoryError('resource_not_found');
     return paymentSessionRow(data);
+  }
+  async claimPaymentSessionCheckoutRefresh(
+    publicPaymentSessionId: string,
+    lockToken: string,
+    leaseSeconds: number,
+  ) {
+    const { data, error } = await this.db.rpc('claim_payment_session_checkout_refresh', {
+      p_public_payment_session_id: publicPaymentSessionId,
+      p_lock_token: lockToken,
+      p_lease_seconds: leaseSeconds,
+    });
+    dbError(error);
+    return data?.[0] ? paymentSessionRow(data[0]) : null;
+  }
+  async completePaymentSessionCheckoutRefresh(input: CompletePaymentSessionCheckoutRefreshInput) {
+    const { data, error } = await this.db.rpc('complete_payment_session_checkout_refresh', {
+      p_public_payment_session_id: input.publicPaymentSessionId,
+      p_private_payment_session_reference: input.privatePaymentSessionReference,
+      p_lock_token: input.lockToken,
+      p_encrypted_provider_checkout_url: input.encryptedProviderCheckoutUrl,
+      p_provider_checkout_host: input.providerCheckoutHost,
+    });
+    dbError(error);
+    return data?.[0] ? paymentSessionRow(data[0]) : null;
+  }
+  async releasePaymentSessionCheckoutRefresh(publicPaymentSessionId: string, lockToken: string) {
+    const { error } = await this.db.rpc('release_payment_session_checkout_refresh', {
+      p_public_payment_session_id: publicPaymentSessionId,
+      p_lock_token: lockToken,
+    });
+    dbError(error);
   }
   async getPaymentSession(publicPaymentSessionId: string) {
     const { data, error } = await this.db

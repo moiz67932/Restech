@@ -58,6 +58,36 @@ Response:
 
 The response must be strict, the URL must be HTTPS and unexpired, and amount/currency must match. Paely must treat the idempotency key plus exact logical input as one creation. Same key/body returns the same session; same key/different body returns 409. A timeout after Paely commits must be safely recoverable by the same key.
 
+## Refresh checkout capability
+
+`POST /api/internal/integrations/restec/v1/payment-sessions/{privatePaymentSessionId}/refresh`
+
+This route uses the same bearer token, service ID, environment, Unix timestamp, exact-body HMAC,
+unique request ID, timeout, retry, and sanitized-error rules as create. The exact signed and sent
+JSON body is `{}`. An idempotency key is not required by Paely for this route.
+
+The response is the same strict, unwrapped object as create:
+
+```json
+{
+  "privatePaymentSessionId": "opaque-private-reference",
+  "status": "requires_customer_action",
+  "providerCheckoutUrl": "https://approved-host.example/opaque-path",
+  "amountMinor": 10000,
+  "currency": "PKR",
+  "expiresAt": "2026-07-23T12:30:00Z"
+}
+```
+
+Paely generates only a fresh Safepay hosted-checkout token and atomically replaces its encrypted
+checkout capability. The existing private session, tracker, customer, payment, order, merchant
+account, amount, currency, environment, and Restec reference remain unchanged.
+
+Restec calls refresh immediately before every `GET /s/{paymentSessionId}` redirect. It requires the
+same private session ID, `requires_customer_action`, matching amount/currency, a future expiry, and
+an HTTPS URL on an exact configured checkout host. Restec persists the refreshed URL encrypted
+before returning HTTP 303 and never falls back to the stored original URL after a refresh failure.
+
 ## Status
 
 `GET /api/internal/integrations/restec/v1/payment-sessions/{privatePaymentSessionId}`
