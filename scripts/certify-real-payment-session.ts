@@ -12,6 +12,17 @@ type SignedRequest = (
   operation?: string,
 ) => Promise<Response>;
 
+function sanitizedDiagnosticError(value: unknown) {
+  if (typeof value !== 'string') return null;
+  return value
+    .replace(
+      /\b(?:track|pps|sec|pk|sk|wh|token)_[A-Za-z0-9_-]+\b/gi,
+      '[redacted]',
+    )
+    .replace(/\s+/g, ' ')
+    .slice(0, 200);
+}
+
 export class CertificationHttpError extends Error {
   constructor(
     public readonly operation: string,
@@ -403,6 +414,65 @@ export async function main() {
 
   const statusPath = `/v1/locations/${encodeURIComponent(locationId)}/payment-sessions/${encodeURIComponent(paymentSessionId)}`;
   const deadline = Date.now() + timeoutMs;
+  const jobToken = required('RESTEC_INTERNAL_JOB_TOKEN');
+  const timeoutDiagnostics = async () => {
+    let paely: Record<string, unknown> = {};
+    const paelyDiagnosticsBase =
+      process.env.PAELY_CERTIFICATION_DIAGNOSTICS_BASE_URL;
+    const paelyDiagnosticsToken =
+      process.env.PAELY_CERTIFICATION_DIAGNOSTICS_TOKEN;
+    if (paelyDiagnosticsBase && paelyDiagnosticsToken) {
+      try {
+        const response = await fetch(
+          new URL(
+            `/api/internal/integrations/restec/v1/certification/payment-sessions/${encodeURIComponent(paymentSessionId)}/diagnostics`,
+            paelyDiagnosticsBase,
+          ),
+          {
+            headers: {
+              Authorization: `Bearer ${paelyDiagnosticsToken}`,
+            },
+          },
+        );
+        if (response.ok) paely = (await response.json()) as Record<string, unknown>;
+      } catch {
+        paely = {};
+      }
+    }
+    let restec: Record<string, unknown> = {};
+    try {
+      const response = await fetch(
+        new URL(
+          `/api/internal/test/payment-sessions/${encodeURIComponent(paymentSessionId)}/evidence`,
+          baseUrl,
+        ),
+        { headers: { Authorization: `Bearer ${jobToken}` } },
+      );
+      if (response.ok) restec = (await response.json()) as Record<string, unknown>;
+    } catch {
+      restec = {};
+    }
+    console.error(
+      JSON.stringify({
+        event: 'restec.certification_timeout',
+        paely_private_session_status:
+          paely.paely_private_session_status ?? finalStatus,
+        webhook_processing_status:
+          paely.webhook_processing_status ?? 'not_observed',
+        webhook_processing_error: sanitizedDiagnosticError(
+          paely.webhook_processing_error,
+        ),
+        payment_completed_outbox_exists:
+          paely.payment_completed_outbox_exists ?? false,
+        paely_outbox_delivery_status:
+          paely.paely_outbox_delivery_status ?? 'not_observed',
+        restec_event_inbox_status:
+          restec.private_event_accepted === true ? 'accepted' : 'not_observed',
+        pos_dispatch_status:
+          restec.pos_outbox_status ?? 'not_observed',
+      }),
+    );
+  };
   let finalStatus = 'unknown';
   while (Date.now() < deadline) {
     const response = await signedRequest('GET', statusPath);
@@ -417,9 +487,11 @@ export async function main() {
       throw new Error(`Certification stopped in terminal state ${finalStatus}.`);
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  if (finalStatus !== 'paid') throw new Error('Timed out waiting for authoritative paid state.');
+  if (finalStatus !== 'paid') {
+    await timeoutDiagnostics();
+    throw new Error('Timed out waiting for authoritative paid state.');
+  }
 
-  const jobToken = required('RESTEC_INTERNAL_JOB_TOKEN');
   const dispatch = await fetch(new URL('/api/internal/jobs/dispatch-pos-events', baseUrl), {
     method: 'POST',
     headers: { Authorization: `Bearer ${jobToken}`, 'Content-Type': 'application/json' },
@@ -439,6 +511,12 @@ export async function main() {
     evidence = await response.json();
     if (evidence.pos_outbox_status === 'delivered' && evidence.mock_pos_accepted) break;
     await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (
+    evidence?.pos_outbox_status !== 'delivered' ||
+    evidence?.mock_pos_accepted !== true
+  ) {
+    await timeoutDiagnostics();
   }
 
   const passed =
