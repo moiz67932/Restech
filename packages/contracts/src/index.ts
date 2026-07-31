@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-const id = (prefix: string) => z.string().regex(new RegExp(`^${prefix}_[A-Za-z0-9]+$`));
+const id = (prefix: string) =>
+  z.string().regex(new RegExp(`^${prefix}_[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`));
 export const publicIds = {
   partner: id('ptr'),
   restaurant: id('rst'),
@@ -211,6 +212,14 @@ export type PublicErrorCode =
   | 'bill_already_paid'
   | 'payload_too_large'
   | 'amount_mismatch'
+  | 'paely_connection_mapping_not_found'
+  | 'paely_location_mapping_not_found'
+  | 'connection_reference_mismatch'
+  | 'location_reference_mismatch'
+  | 'payment_session_reference_mismatch'
+  | 'external_bill_reference_mismatch'
+  | 'payment_method_mismatch'
+  | 'payment_status_mismatch'
   | 'invalid_status_transition'
   | 'bill_not_payable'
   | 'amount_exceeds_balance'

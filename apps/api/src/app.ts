@@ -772,9 +772,83 @@ export function createApp(deps: {
       !con ||
       con.environment !== (deps.config.RESTEC_ENV === 'production' ? 'production' : 'sandbox')
     )
-      throw new ApiError(404, 'resource_not_found', 'The event connection was not found.');
-    if (incoming.data.location_id !== con.privateLocationId)
+      throw new ApiError(
+        400,
+        'paely_connection_mapping_not_found',
+        'The Paely connection reference has no active Restec mapping.',
+      );
+    const mappedLocation = await deps.repository.getLocationForPrivateEvent(
+      incoming.data.location_id,
+    );
+    if (!mappedLocation || mappedLocation.environment !== deploymentEnvironment)
+      throw new ApiError(
+        400,
+        'paely_location_mapping_not_found',
+        'The Paely location reference has no Restec mapping.',
+      );
+    if (incoming.data.payment_session) {
+      const session = await deps.repository.getPaymentSession(
+        incoming.data.payment_session.restec_payment_session_reference,
+      );
+      if (!session || session.environment !== deploymentEnvironment)
+        throw new ApiError(404, 'resource_not_found', 'The payment session was not found.');
+      if (
+        con.connectionId !== session.connectionId ||
+        session.privateConnectionReference !== incoming.data.connection_id
+      )
+        throw new ApiError(
+          400,
+          'connection_reference_mismatch',
+          'The event connection does not match the payment session.',
+        );
+      if (
+        mappedLocation.locationId !== session.locationId ||
+        session.privateLocationReference !== incoming.data.location_id
+      )
+        throw new ApiError(
+          400,
+          'location_reference_mismatch',
+          'The event location does not match the payment session.',
+        );
+      if (
+        session.privatePaymentSessionReference !==
+        incoming.data.payment_session.private_payment_session_id
+      )
+        throw new ApiError(
+          400,
+          'payment_session_reference_mismatch',
+          'The private payment session reference does not match.',
+        );
+      if (session.externalBillId !== incoming.data.external_bill_id)
+        throw new ApiError(
+          400,
+          'external_bill_reference_mismatch',
+          'The external bill reference does not match the payment session.',
+        );
+      if (
+        session.amountMinor !== incoming.data.payment.amount ||
+        session.currency !== incoming.data.payment.currency
+      )
+        throw new ApiError(
+          422,
+          'amount_mismatch',
+          'The payment amount or currency does not match the payment session.',
+        );
+      if (session.method !== incoming.data.payment.method)
+        throw new ApiError(
+          400,
+          'payment_method_mismatch',
+          'The payment method does not match the payment session.',
+        );
+      if (incoming.data.payment_session.status !== paymentStatusFromEvent(incoming.type))
+        throw new ApiError(
+          400,
+          'payment_status_mismatch',
+          'The payment session status does not match the event type.',
+        );
+    } else if (mappedLocation.locationId !== con.locationId) {
       throw new ApiError(403, 'access_denied', 'The event location is not authorized.');
+    }
     const publicEvent = eventSchema.parse({
       id: `evt_${sha256(incoming.id).slice(0, 24)}`,
       type: incoming.type,
@@ -1017,8 +1091,24 @@ export function createApp(deps: {
         error.status as any,
       );
     if (error instanceof RepositoryError) {
+      const associationRejections = new Set([
+        'paely_connection_mapping_not_found',
+        'paely_location_mapping_not_found',
+        'connection_reference_mismatch',
+        'location_reference_mismatch',
+        'payment_session_reference_mismatch',
+        'external_bill_reference_mismatch',
+        'payment_method_mismatch',
+        'payment_status_mismatch',
+      ]);
       const status =
-        error.code === 'resource_not_found' ? 404 : error.code === 'amount_mismatch' ? 422 : 409;
+        error.code === 'resource_not_found'
+          ? 404
+          : error.code === 'amount_mismatch'
+            ? 422
+            : associationRejections.has(error.code)
+              ? 400
+              : 409;
       const messages: Record<string, string> = {
         resource_not_found: 'The requested resource was not found.',
         replay_detected: 'A conflicting event or request was detected.',
@@ -1028,6 +1118,16 @@ export function createApp(deps: {
         bill_already_paid: 'The bill is already paid or the amount exceeds the amount due.',
         amount_mismatch: 'The amount or currency does not match the bill.',
         invalid_status_transition: 'The requested payment state transition is not allowed.',
+        paely_connection_mapping_not_found:
+          'The Paely connection reference has no active Restec mapping.',
+        paely_location_mapping_not_found: 'The Paely location reference has no Restec mapping.',
+        connection_reference_mismatch: 'The event connection does not match the payment session.',
+        location_reference_mismatch: 'The event location does not match the payment session.',
+        payment_session_reference_mismatch: 'The private payment session reference does not match.',
+        external_bill_reference_mismatch:
+          'The external bill reference does not match the payment session.',
+        payment_method_mismatch: 'The payment method does not match the payment session.',
+        payment_status_mismatch: 'The payment session status does not match the event type.',
       };
       return c.json(
         {

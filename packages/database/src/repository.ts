@@ -15,7 +15,15 @@ export type RepositoryErrorCode =
   | 'payment_in_progress'
   | 'bill_already_paid'
   | 'amount_mismatch'
-  | 'invalid_status_transition';
+  | 'invalid_status_transition'
+  | 'paely_connection_mapping_not_found'
+  | 'paely_location_mapping_not_found'
+  | 'connection_reference_mismatch'
+  | 'location_reference_mismatch'
+  | 'payment_session_reference_mismatch'
+  | 'external_bill_reference_mismatch'
+  | 'payment_method_mismatch'
+  | 'payment_status_mismatch';
 export class RepositoryError extends Error {
   public readonly code: RepositoryErrorCode;
 
@@ -43,6 +51,10 @@ export interface AuthorizedLocation {
   privateLocationId: string;
   privateConnectionId: string;
   configuration: Record<string, unknown>;
+}
+export interface PrivateLocationMapping {
+  locationId: string;
+  environment: Environment;
 }
 export interface PublicTable {
   table_id: string;
@@ -262,6 +274,7 @@ export interface RestecRepository {
   ): Promise<CanonicalBillState>;
   acceptPrivateEvent(input: PrivateEventInput): Promise<{ eventId: string; duplicate: boolean }>;
   getConnectionForPrivateEvent(privateConnectionId: string): Promise<AuthorizedLocation | null>;
+  getLocationForPrivateEvent(privateLocationId: string): Promise<PrivateLocationMapping | null>;
   findSandboxConnection(
     partnerId: string,
     externalBillId: string,

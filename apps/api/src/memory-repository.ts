@@ -228,6 +228,12 @@ export class MemoryRepository implements RestecRepository {
   async getConnectionForPrivateEvent(id: string) {
     return [...this.connections.values()].find((v) => v.privateConnectionId === id) ?? null;
   }
+  async getLocationForPrivateEvent(id: string) {
+    const connection = [...this.connections.values()].find((v) => v.privateLocationId === id);
+    return connection
+      ? { locationId: connection.locationId, environment: connection.environment }
+      : null;
+  }
   async findSandboxConnection(partnerId: string, externalBillId: string) {
     const candidates = [...this.connections.values()].filter(
       (connection) => connection.partnerId === partnerId && connection.environment === 'sandbox',
@@ -529,6 +535,50 @@ export class MemoryRepository implements RestecRepository {
       });
       return { eventId: input.publicEventId, duplicate: false };
     }
+    const payload = input.payload as {
+      data: {
+        connection_id: string;
+        location_id: string;
+        external_bill_id: string;
+        payment: { amount: number; currency: string; method: string };
+        payment_session: { private_payment_session_id: string; status: string };
+      };
+    };
+    const connection = [...this.connections.values()].find(
+      (value) => value.privateConnectionId === payload.data.connection_id,
+    );
+    if (!connection) throw new RepositoryError('paely_connection_mapping_not_found');
+    const location = await this.getLocationForPrivateEvent(payload.data.location_id);
+    if (!location) throw new RepositoryError('paely_location_mapping_not_found');
+    if (
+      connection.connectionId !== session.connectionId ||
+      session.privateConnectionReference !== payload.data.connection_id
+    )
+      throw new RepositoryError('connection_reference_mismatch');
+    if (
+      location.locationId !== session.locationId ||
+      session.privateLocationReference !== payload.data.location_id
+    )
+      throw new RepositoryError('location_reference_mismatch');
+    if (
+      session.privatePaymentSessionReference !==
+      payload.data.payment_session.private_payment_session_id
+    )
+      throw new RepositoryError('payment_session_reference_mismatch');
+    if (session.externalBillId !== payload.data.external_bill_id)
+      throw new RepositoryError('external_bill_reference_mismatch');
+    if (
+      session.amountMinor !== payload.data.payment.amount ||
+      session.currency !== payload.data.payment.currency
+    )
+      throw new RepositoryError('amount_mismatch');
+    if (session.method !== payload.data.payment.method)
+      throw new RepositoryError('payment_method_mismatch');
+    if (payload.data.payment_session.status !== input.requestedStatus)
+      throw new RepositoryError('payment_status_mismatch');
+    const bill = this.bills.get(`${session.connectionId}:${session.externalBillId}`);
+    if (!bill || bill.external_table_id !== input.publicPayload.data.external_table_id)
+      throw new RepositoryError('resource_not_found');
     transitionPaymentSessionStatus(session.status, input.requestedStatus);
     const accepted = await this.acceptPrivateEvent(input);
     await this.transitionPaymentSession(

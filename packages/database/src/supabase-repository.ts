@@ -43,6 +43,14 @@ const publicRepositoryCodes = new Set([
   'bill_already_paid',
   'amount_mismatch',
   'invalid_status_transition',
+  'paely_connection_mapping_not_found',
+  'paely_location_mapping_not_found',
+  'connection_reference_mismatch',
+  'location_reference_mismatch',
+  'payment_session_reference_mismatch',
+  'external_bill_reference_mismatch',
+  'payment_method_mismatch',
+  'payment_status_mismatch',
 ]);
 const dbError = (error: { message: string } | null) => {
   if (error) {
@@ -430,6 +438,15 @@ export class SupabaseRepository implements RestecRepository {
     return data
       ? this.authorizeLocation(data.location_id, data.partner_id, data.environment)
       : null;
+  }
+  async getLocationForPrivateEvent(privateLocationId: string) {
+    const { data, error } = await this.db
+      .from('locations')
+      .select('id,environment')
+      .eq('private_location_reference', privateLocationId)
+      .maybeSingle();
+    dbError(error);
+    return data ? { locationId: data.id, environment: data.environment } : null;
   }
   async findSandboxConnection(partnerId: string, externalBillId: string) {
     const { data: bill } = await this.db
