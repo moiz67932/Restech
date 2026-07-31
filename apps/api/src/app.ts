@@ -72,6 +72,24 @@ const privateEvent = z
     }),
   })
   .strict();
+const privateContractTestEvent = z
+  .object({
+    id: z.string().regex(/^contract_[0-9a-f]{32}$/),
+    type: z.literal('contract.test'),
+    schema_version: z.literal('2026-07-01'),
+    created_at: z.string().datetime(),
+    data: z
+      .object({
+        contract: z.literal('hosted-payment-session'),
+        payment_session: z
+          .object({
+            restec_payment_session_reference: z.string().regex(/^rps_test_[A-Za-z0-9]+$/),
+          })
+          .strict(),
+      })
+      .strict(),
+  })
+  .strict();
 export function createApp(deps: {
   repository: Repository;
   privateClient: PaelyClient;
@@ -719,7 +737,26 @@ export function createApp(deps: {
       deliveryAttempt < 1
     )
       throw new ApiError(401, 'invalid_credentials', 'The event signature is invalid.');
-    const incoming = privateEvent.parse(parseRaw(raw));
+    const parsed = parseRaw(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'type' in parsed &&
+      parsed.type === 'contract.test'
+    ) {
+      if (deploymentEnvironment !== 'sandbox')
+        throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
+      const contract = privateContractTestEvent.parse(parsed);
+      if (
+        c.req.header('X-Paely-Service-Id') !== deps.config.PAELY_EVENT_SERVICE_ID ||
+        c.req.header('X-Paely-Environment') !== 'sandbox'
+      )
+        throw new ApiError(401, 'invalid_credentials', 'The event identity is invalid.');
+      if (contract.id !== privateId)
+        throw new ApiError(400, 'invalid_request', 'The event identifier is inconsistent.');
+      return c.json({ accepted: true, contract: '2026-07-01' }, 202);
+    }
+    const incoming = privateEvent.parse(parsed);
     if (
       incoming.data.payment_session &&
       (c.req.header('X-Paely-Service-Id') !== deps.config.PAELY_EVENT_SERVICE_ID ||

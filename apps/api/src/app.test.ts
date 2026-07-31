@@ -110,3 +110,93 @@ test('private event is durably deduplicated before response', async () => {
   assert.equal(second.status, 200);
   assert.equal(repo.events.size, 1);
 });
+
+test('sandbox receiver preflight validates identity, environment, HMAC, and exact contract', async () => {
+  const app = createApp({
+    repository: new MemoryRepository(),
+    privateClient: {} as never,
+    config,
+    eventSigningSecret: 'secret',
+    internalJobToken: 'job',
+  });
+  const event = {
+    id: 'contract_0123456789abcdef0123456789abcdef',
+    type: 'contract.test',
+    schema_version: '2026-07-01',
+    created_at: new Date().toISOString(),
+    data: {
+      contract: 'hosted-payment-session',
+      payment_session: {
+        restec_payment_session_reference: 'rps_test_contractpreflight',
+      },
+    },
+  };
+  const request = async (
+    value: typeof event,
+    overrides: Record<string, string> = {},
+    signingSecret = 'secret',
+  ) => {
+    const body = JSON.stringify(value);
+    const timestamp = Math.floor(Date.now() / 1000);
+    return app.request('/api/internal/events/paely/v1', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Paely-Event-Id': value.id,
+        'X-Paely-Service-Id': 'paely',
+        'X-Paely-Environment': 'sandbox',
+        'X-Paely-Timestamp': String(timestamp),
+        'X-Paely-Signature': signEvent(signingSecret, timestamp, body),
+        'X-Paely-Delivery-Attempt': '1',
+        ...overrides,
+      },
+      body,
+    });
+  };
+  assert.equal((await request(event)).status, 202);
+  assert.equal(
+    (await request(event, { 'X-Paely-Service-Id': 'old-service' })).status,
+    401,
+  );
+  assert.equal(
+    (await request(event, { 'X-Paely-Environment': 'production' })).status,
+    401,
+  );
+  assert.equal((await request(event, {}, 'wrong-secret')).status, 401);
+  assert.equal(
+    (await request({ ...event, schema_version: 'legacy' } as typeof event)).status,
+    400,
+  );
+});
+
+test('legacy generic payload with extra correlation_id remains unsupported', async () => {
+  const app = createApp({
+    repository: new MemoryRepository(),
+    privateClient: {} as never,
+    config,
+    eventSigningSecret: 'secret',
+    internalJobToken: 'job',
+  });
+  const value = {
+    id: 'legacy-event',
+    type: 'payment.failed',
+    schema_version: '2026-07-01',
+    correlation_id: 'legacy-correlation',
+    created_at: new Date().toISOString(),
+    data: {},
+  };
+  const body = JSON.stringify(value);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const response = await app.request('/api/internal/events/paely/v1', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Paely-Event-Id': value.id,
+      'X-Paely-Timestamp': String(timestamp),
+      'X-Paely-Signature': signEvent('secret', timestamp, body),
+      'X-Paely-Delivery-Attempt': '1',
+    },
+    body,
+  });
+  assert.equal(response.status, 400);
+});
