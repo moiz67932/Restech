@@ -967,6 +967,7 @@ export class SupabaseRepository implements RestecRepository {
       matchingMockPosReceiptCount = receiptResult.count ?? receiptResult.data?.length ?? 0;
     }
     return {
+      privatePaymentSessionReference: session.privatePaymentSessionReference,
       paymentSessionStatus: session.status,
       paidAt: session.paidAt ?? null,
       billPaymentStatus: billResult.data?.payment_status ?? null,

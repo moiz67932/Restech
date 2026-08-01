@@ -208,6 +208,7 @@ export interface MockPosReceipt {
   receivedAt: string;
 }
 export interface PaymentSessionCertificationEvidence {
+  privatePaymentSessionReference: string | undefined;
   paymentSessionStatus: PaymentSessionStatus;
   paidAt: string | null;
   billPaymentStatus: string | null;

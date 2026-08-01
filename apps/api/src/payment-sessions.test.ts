@@ -208,6 +208,16 @@ test('payment session is Restec-only, encrypted at rest, idempotent, and refresh
   const stored = await repo.getPaymentSession(response.payment_session_id);
   assert(stored?.encryptedProviderCheckoutUrl);
   assert.equal(stored.encryptedProviderCheckoutUrl.includes('checkout.example'), false);
+  const evidenceResponse = await app.request(
+    `/api/internal/test/payment-sessions/${response.payment_session_id}/evidence`,
+    { headers: { Authorization: 'Bearer job-secret' } },
+  );
+  assert.equal(evidenceResponse.status, 200, await evidenceResponse.clone().text());
+  assert.equal(
+    ((await evidenceResponse.json()) as { private_payment_session_id?: string })
+      .private_payment_session_id,
+    'private-session-hidden',
+  );
 
   const replay = await app.request(path, {
     method: 'POST',

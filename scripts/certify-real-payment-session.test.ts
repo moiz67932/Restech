@@ -11,9 +11,14 @@ import {
   createCertificationCancellationHandler,
   createPaymentSessionWithCleanup,
   monitorCertification,
+  paelyCertificationDiagnosticsPath,
+  reportPollingHttpResponse,
   type PaelyCertificationEvidence,
   type RestecCertificationEvidence,
 } from './certify-real-payment-session.js';
+
+const timedOutPublicSessionId = 'rps_test_33a8322a6ec21d0ed8ce12f838';
+const timedOutPrivateSessionId = 'pps_a6bd99a4cc7f499185377aaf3ac94274';
 
 const paidStatus = {
   status: 'paid',
@@ -219,6 +224,80 @@ test('certificationBillBody preserves financial values when cancelling', () => {
   assert.deepEqual(cancelled.totals, open.totals);
   assert.equal(cancelled.external_table_id, open.external_table_id);
   assert.equal(cancelled.status, 'cancelled');
+});
+
+test('Paely diagnostics use the private session mapped by Restec evidence', () => {
+  const path = paelyCertificationDiagnosticsPath({
+    private_payment_session_id: timedOutPrivateSessionId,
+    payment_session_status: 'requires_customer_action',
+  });
+  assert.equal(
+    path,
+    `/api/internal/integrations/restec/v1/certification/payment-sessions/${timedOutPrivateSessionId}/diagnostics`,
+  );
+  assert.equal(path.includes(timedOutPublicSessionId), false);
+  assert.throws(
+    () => paelyCertificationDiagnosticsPath({ payment_session_status: 'paid' }),
+    /Deploy the Restec API before running certification/,
+  );
+});
+
+test('polling diagnostics print each response body and redact private identifiers', async () => {
+  const reports: Array<Record<string, any>> = [];
+  await reportPollingHttpResponse(
+    'paely_evidence',
+    3,
+    Response.json({
+      status: 'paid',
+      private_payment_session_id: timedOutPrivateSessionId,
+      signature_valid: true,
+      verified: true,
+      processed: true,
+    }),
+    (diagnostic) => reports.push(diagnostic),
+  );
+  assert.deepEqual(reports, [
+    {
+      event: 'restec.certification_poll_http_response',
+      attempt: 3,
+      source: 'paely_evidence',
+      http_status: 200,
+      body: {
+        status: 'paid',
+        private_payment_session_id: '[redacted]',
+        signature_valid: true,
+        verified: true,
+        processed: true,
+      },
+    },
+  ]);
+});
+
+test('processed Safepay payment for the previously timed-out session completes polling', async () => {
+  const pollReports: Array<Record<string, any>> = [];
+  let paelyDispatches = 0;
+  await monitorCertification({
+    initialStatus: 'requires_customer_action',
+    timeoutMs: 1_000,
+    readRestecStatus: async () => ({ ...paidStatus, payment_session_id: timedOutPublicSessionId }),
+    readPaelyEvidence: async () =>
+      verifiedPaely({
+        paely_outbox_delivery_status: paelyDispatches === 0 ? 'pending' : 'delivered',
+      }),
+    readRestecEvidence: async () => deliveredRestec(),
+    dispatchPaely: async () => {
+      paelyDispatches++;
+    },
+    dispatchRestec: async () => undefined,
+    reportPoll: (diagnostic) => pollReports.push(diagnostic),
+    sleep: async () => undefined,
+  });
+  assert.equal(paelyDispatches, 1);
+  assert.equal(pollReports.length, 2);
+  assert.equal((pollReports[0]?.paely_evidence as any)?.signature_valid, true);
+  assert.equal((pollReports[0]?.paely_evidence as any)?.verified, true);
+  assert.equal((pollReports[0]?.paely_evidence as any)?.processed, true);
+  assert.equal((pollReports[0]?.paely_evidence as any)?.paely_private_session_status, 'paid');
 });
 
 test('automatic progression succeeds without Enter and invokes configured dispatchers', async () => {

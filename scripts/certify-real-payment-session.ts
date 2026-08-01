@@ -164,6 +164,7 @@ export interface PaelyCertificationEvidence {
 }
 
 export interface RestecCertificationEvidence {
+  private_payment_session_id?: string;
   payment_session_status?: string;
   paid_at?: string | null;
   bill_payment_status?: string | null;
@@ -221,15 +222,62 @@ export interface CertificationMonitorInput {
   timeoutMs: number;
   operator?: OperatorWaiter;
   signal?: AbortSignal;
-  readRestecStatus: () => Promise<PublicSessionStatus>;
-  readPaelyEvidence: () => Promise<PaelyCertificationEvidence>;
-  readRestecEvidence: () => Promise<RestecCertificationEvidence>;
-  dispatchPaely?: () => Promise<void>;
-  dispatchRestec: () => Promise<void>;
+  readRestecStatus: (attempt: number) => Promise<PublicSessionStatus>;
+  readPaelyEvidence: (attempt: number) => Promise<PaelyCertificationEvidence>;
+  readRestecEvidence: (attempt: number) => Promise<RestecCertificationEvidence>;
+  dispatchPaely?: (attempt: number) => Promise<void>;
+  dispatchRestec: (attempt: number) => Promise<void>;
   reportStage?: (stage: CertificationStage, details?: Record<string, unknown>) => void;
   reportDiagnostic?: (diagnostic: Record<string, unknown>) => void;
+  reportPoll?: (diagnostic: Record<string, unknown>) => void;
   now?: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
+
+export function paelyCertificationDiagnosticsPath(evidence: RestecCertificationEvidence) {
+  const privatePaymentSessionId = evidence.private_payment_session_id;
+  if (!privatePaymentSessionId)
+    throw new Error(
+      'The deployed Restec evidence endpoint did not return private_payment_session_id. Deploy the Restec API before running certification.',
+    );
+  return `/api/internal/integrations/restec/v1/certification/payment-sessions/${encodeURIComponent(privatePaymentSessionId)}/diagnostics`;
+}
+
+const sanitizedPollingValue = (value: unknown): unknown => {
+  if (typeof value === 'string') return sanitizedDiagnosticError(value);
+  if (Array.isArray(value)) return value.map(sanitizedPollingValue);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+        key,
+        sanitizedPollingValue(entry),
+      ]),
+    );
+  return value;
+};
+
+export async function reportPollingHttpResponse(
+  source: string,
+  attempt: number,
+  response: Response,
+  report: (diagnostic: Record<string, unknown>) => void,
+) {
+  const rawBody = await response.text();
+  let body: unknown = rawBody;
+  if (rawBody) {
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      // Preserve non-JSON bodies as sanitized text.
+    }
+  } else body = null;
+  report({
+    event: 'restec.certification_poll_http_response',
+    attempt,
+    source,
+    http_status: response.status,
+    body: sanitizedPollingValue(body),
+  });
 }
 
 const safepayWebhookVerified = (evidence: PaelyCertificationEvidence) => {
@@ -364,6 +412,7 @@ export async function monitorCertification(input: CertificationMonitorInput) {
   const sleep = input.sleep ?? abortableSleep;
   const reportStage = input.reportStage ?? (() => undefined);
   const reportDiagnostic = input.reportDiagnostic ?? console.error;
+  const reportPoll = input.reportPoll ?? (() => undefined);
   const deadline = now() + input.timeoutMs;
   const progressed = deferred<void>();
   const emitted = new Set<CertificationStage>([
@@ -404,11 +453,19 @@ export async function monitorCertification(input: CertificationMonitorInput) {
     try {
       do {
         if (input.signal?.aborted) throw new CertificationCancelledError();
+        const pollAttempt = attempt + 1;
         [status, paely, restec] = await Promise.all([
-          input.readRestecStatus(),
-          input.readPaelyEvidence(),
-          input.readRestecEvidence(),
+          input.readRestecStatus(pollAttempt),
+          input.readPaelyEvidence(pollAttempt),
+          input.readRestecEvidence(pollAttempt),
         ]);
+        reportPoll({
+          event: 'restec.certification_poll_evidence',
+          attempt: pollAttempt,
+          public_session: sanitizedPollingValue(status),
+          paely_evidence: sanitizedPollingValue(paely),
+          restec_evidence: sanitizedPollingValue(restec),
+        });
         if (hasProgressed(input.initialStatus, status, paely)) markProgress();
 
         if (safepayWebhookVerified(paely)) emit('safepay_webhook_verified');
@@ -442,9 +499,9 @@ export async function monitorCertification(input: CertificationMonitorInput) {
           !paelyEventDelivered(paely) &&
           input.dispatchPaely
         )
-          await input.dispatchPaely();
+          await input.dispatchPaely(pollAttempt);
         if (inboxCount === 1 && restec.pos_outbox_status !== 'delivered')
-          await input.dispatchRestec();
+          await input.dispatchRestec(pollAttempt);
 
         const passed =
           emitted.has('safepay_webhook_verified') &&
@@ -824,12 +881,6 @@ export async function main() {
   const paelyBase = paelyBaseValue ? new URL(paelyBaseValue) : undefined;
   if (paelyBase && paelyBase.protocol !== 'https:')
     throw new Error('The Paely certification base URL must use HTTPS.');
-  const paelyDiagnosticsUrl = paelyBase
-    ? new URL(
-        `/api/internal/integrations/restec/v1/certification/payment-sessions/${encodeURIComponent(paymentSessionId)}/diagnostics`,
-        paelyBase,
-      )
-    : undefined;
   const paelyDispatchPath =
     process.env.PAELY_CERTIFICATION_DISPATCH_PATH ??
     '/api/internal/integrations/restec/v1/jobs/dispatch-outbox';
@@ -837,32 +888,45 @@ export async function main() {
     throw new Error('PAELY_CERTIFICATION_DISPATCH_PATH must be an absolute path.');
   const paelyDispatchUrl = paelyBase ? new URL(paelyDispatchPath, paelyBase) : undefined;
 
-  const readPaelyEvidence = async () => {
+  const reportPollingResponse = (diagnostic: Record<string, unknown>) =>
+    console.log(JSON.stringify(diagnostic));
+  const traceResponse = async (source: string, attempt: number, response: Response) =>
+    reportPollingHttpResponse(source, attempt, response.clone(), reportPollingResponse);
+
+  const readRestecEvidence = async (attempt = 0) => {
+    const response = await fetch(evidenceUrl, {
+      headers: { Authorization: `Bearer ${jobToken}` },
+    });
+    await traceResponse('restec_evidence', attempt, response);
+    if (!response.ok) await failure('certification evidence', response);
+    return (await response.json()) as RestecCertificationEvidence;
+  };
+  const initialRestecEvidence = await readRestecEvidence(0);
+  const paelyDiagnosticsUrl = paelyBase
+    ? new URL(paelyCertificationDiagnosticsPath(initialRestecEvidence), paelyBase)
+    : undefined;
+
+  const readPaelyEvidence = async (attempt = 0) => {
     if (!paelyDiagnosticsUrl || !paelyToken)
       return { dispatcher_status: 'credentials_not_configured' };
     const response = await fetch(paelyDiagnosticsUrl, {
       headers: { Authorization: `Bearer ${paelyToken}` },
     });
+    await traceResponse('paely_evidence', attempt, response);
     if (!response.ok) return { dispatcher_status: `diagnostics_http_${response.status}` };
     return (await response.json()) as PaelyCertificationEvidence;
   };
-  const readRestecEvidence = async () => {
-    const response = await fetch(evidenceUrl, {
-      headers: { Authorization: `Bearer ${jobToken}` },
-    });
-    if (!response.ok) await failure('certification evidence', response);
-    return (await response.json()) as RestecCertificationEvidence;
-  };
-  const dispatchRestec = async () => {
+  const dispatchRestec = async (attempt = 0) => {
     const response = await fetch(new URL('/api/internal/jobs/dispatch-pos-events', baseUrl), {
       method: 'POST',
       headers: { Authorization: `Bearer ${jobToken}`, 'Content-Type': 'application/json' },
     });
+    await traceResponse('restec_dispatcher', attempt, response);
     if (!response.ok) await failure('POS event dispatcher', response);
   };
   const dispatchPaely =
     paelyDispatchUrl && paelyToken
-      ? async () => {
+      ? async (attempt = 0) => {
           const response = await fetch(paelyDispatchUrl, {
             method: 'POST',
             headers: {
@@ -870,6 +934,7 @@ export async function main() {
               'Content-Type': 'application/json',
             },
           });
+          await traceResponse('paely_dispatcher', attempt, response);
           if (!response.ok)
             throw new CertificationHttpError(
               'Paely integration outbox dispatcher',
@@ -891,8 +956,9 @@ export async function main() {
         timeoutMs,
         operator,
         signal: abortController.signal,
-        readRestecStatus: async () => {
+        readRestecStatus: async (attempt) => {
           const response = await signedRequest('GET', statusPath);
+          await traceResponse('restec_public_session', attempt, response);
           const status = (await response.json()) as PublicSessionStatus;
           externalBillId ||= status.external_bill_id ?? '';
           return status;
@@ -903,6 +969,7 @@ export async function main() {
         dispatchRestec,
         reportStage,
         reportDiagnostic: (diagnostic) => console.error(JSON.stringify(diagnostic, null, 2)),
+        reportPoll: reportPollingResponse,
       });
     } catch (error) {
       if (abortController.signal.aborted) throw new CertificationCancelledError();

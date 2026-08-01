@@ -642,6 +642,7 @@ export class MemoryRepository implements RestecRepository {
         matchingEventIds.has(receipt.eventId) && receipt.eventType === 'payment.completed',
     ).length;
     return {
+      privatePaymentSessionReference: session.privatePaymentSessionReference,
       paymentSessionStatus: session.status,
       paidAt: session.paidAt ?? null,
       billPaymentStatus:

@@ -702,6 +702,7 @@ export function createApp(deps: {
       );
     return c.json({
       payment_session_id: c.req.param('paymentSessionId'),
+      private_payment_session_id: evidence.privatePaymentSessionReference,
       payment_session_status: evidence.paymentSessionStatus,
       paid_at: evidence.paidAt,
       bill_payment_status: evidence.billPaymentStatus,
