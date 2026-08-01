@@ -933,46 +933,52 @@ export class SupabaseRepository implements RestecRepository {
         .maybeSingle(),
       this.db
         .from('pos_outbox_events')
-        .select('id,public_event_id,status,deduplication_key,attempt_count')
+        .select('id,public_event_id,status,deduplication_key,attempt_count,event_type')
         .eq('connection_id', session.connectionId)
+        .eq('event_type', 'payment.completed')
         .contains('payload', { data: { payment_session_id: publicPaymentSessionId } })
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+        .order('created_at', { ascending: false }),
     ]);
     dbError(billResult.error);
     dbError(outboxResult.error);
-    const outbox = outboxResult.data;
-    let privateEventAccepted = false;
-    let mockPosAccepted = false;
-    if (outbox) {
+    const outboxes = outboxResult.data ?? [];
+    const outbox = outboxes[0];
+    let paymentCompletedInboxCount = 0;
+    let matchingMockPosReceiptCount = 0;
+    if (outboxes.length > 0) {
+      const privateEventIds = outboxes.map((event) => event.deduplication_key);
+      const publicEventIds = outboxes.map((event) => event.public_event_id);
       const [inboxResult, receiptResult] = await Promise.all([
         this.db
           .from('private_event_inbox')
-          .select('private_event_id')
-          .eq('private_event_id', outbox.deduplication_key)
-          .eq('status', 'accepted')
-          .maybeSingle(),
+          .select('private_event_id', { count: 'exact' })
+          .in('private_event_id', privateEventIds)
+          .eq('event_type', 'payment.completed')
+          .eq('status', 'accepted'),
         this.db
           .from('mock_pos_receipts')
-          .select('event_id')
-          .eq('event_id', outbox.public_event_id)
-          .maybeSingle(),
+          .select('event_id', { count: 'exact' })
+          .in('event_id', publicEventIds)
+          .eq('event_type', 'payment.completed'),
       ]);
       dbError(inboxResult.error);
       dbError(receiptResult.error);
-      privateEventAccepted = Boolean(inboxResult.data);
-      mockPosAccepted = Boolean(receiptResult.data);
+      paymentCompletedInboxCount = inboxResult.count ?? inboxResult.data?.length ?? 0;
+      matchingMockPosReceiptCount = receiptResult.count ?? receiptResult.data?.length ?? 0;
     }
     return {
       paymentSessionStatus: session.status,
+      paidAt: session.paidAt ?? null,
       billPaymentStatus: billResult.data?.payment_status ?? null,
-      privateEventAccepted,
+      privateEventAccepted: paymentCompletedInboxCount > 0,
+      paymentCompletedInboxCount,
       publicEventId: outbox?.public_event_id ?? null,
       posOutboxStatus: outbox?.status ?? null,
+      paymentCompletedPosCount: outboxes.length,
       deliveryAttempts: outbox?.attempt_count ?? 0,
-      mockPosAccepted,
-      deadLettered: outbox?.status === 'dead_letter',
+      mockPosAccepted: matchingMockPosReceiptCount > 0,
+      matchingMockPosReceiptCount,
+      deadLettered: outboxes.some((event) => event.status === 'dead_letter'),
     };
   }
   async listPaymentSessionsForReconciliation(limit: number) {

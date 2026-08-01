@@ -40,6 +40,10 @@ export class MemoryRepository implements RestecRepository {
   events = new Map<string, string>();
   eventHashes = new Map<string, string>();
   outbox = new Map<string, ClaimedPosOutboxEvent>();
+  archivedOutbox = new Map<
+    string,
+    { event: ClaimedPosOutboxEvent; status: 'delivered' | 'dead_letter' }
+  >();
   attempts: DeliveryAttempt[] = [];
   audits: AuditInput[] = [];
   paymentSessions = new Map<string, PaymentSessionRecord>();
@@ -265,7 +269,10 @@ export class MemoryRepository implements RestecRepository {
   }
   async markOutboxDelivered(id: string) {
     const row = [...this.outbox.entries()].find(([, event]) => event.id === id);
-    if (row) this.outbox.delete(row[0]);
+    if (row) {
+      this.outbox.delete(row[0]);
+      this.archivedOutbox.set(row[0], { event: row[1], status: 'delivered' });
+    }
   }
   async scheduleOutboxRetry(_id?: string, _next?: Date, _errorCode?: string) {
     const row = [...this.outbox.values()].find((event) => event.id === _id);
@@ -275,7 +282,10 @@ export class MemoryRepository implements RestecRepository {
   async markOutboxDeadLetter(id: string, _errorCode?: string) {
     void _errorCode;
     const row = [...this.outbox.entries()].find(([, event]) => event.id === id);
-    if (row) this.outbox.delete(row[0]);
+    if (row) {
+      this.outbox.delete(row[0]);
+      this.archivedOutbox.set(row[0], { event: row[1], status: 'dead_letter' });
+    }
   }
   async releaseExpiredLeases() {
     return 0;
@@ -615,29 +625,38 @@ export class MemoryRepository implements RestecRepository {
   async getPaymentSessionCertificationEvidence(publicPaymentSessionId: string) {
     const session = this.paymentSessions.get(publicPaymentSessionId);
     if (!session) return null;
-    const outbox = [...this.outbox.values()].find(
-      (event) => event.payload.data.payment_session_id === publicPaymentSessionId,
+    const matchingOutbox = [
+      ...[...this.outbox.values()].map((event) => ({ event, status: 'pending' as const })),
+      ...this.archivedOutbox.values(),
+    ].filter(
+      ({ event }) =>
+        event.eventType === 'payment.completed' &&
+        event.payload.data.payment_session_id === publicPaymentSessionId,
     );
-    const eventId =
-      outbox?.publicEventId ??
-      [...this.mockPosReceipts.values()].find((receipt) =>
-        [...this.events.values()].includes(receipt.eventId),
-      )?.eventId ??
-      null;
+    const outbox = matchingOutbox[0];
+    const eventId = outbox?.event.publicEventId ?? null;
+    const matchingEventIds = new Set(matchingOutbox.map(({ event }) => event.publicEventId));
+    const inboxCount = [...this.events.values()].filter((id) => matchingEventIds.has(id)).length;
+    const receiptCount = [...this.mockPosReceipts.values()].filter(
+      (receipt) =>
+        matchingEventIds.has(receipt.eventId) && receipt.eventType === 'payment.completed',
+    ).length;
     return {
       paymentSessionStatus: session.status,
+      paidAt: session.paidAt ?? null,
       billPaymentStatus:
         this.bills.get(`${session.connectionId}:${session.externalBillId}`)?.payment_status ?? null,
-      privateEventAccepted: [...this.events.values()].some(
-        (id) => id === outbox?.publicEventId || id === eventId,
-      ),
-      publicEventId: outbox?.publicEventId ?? eventId,
-      posOutboxStatus: outbox ? 'pending' : eventId ? 'delivered' : null,
+      privateEventAccepted: inboxCount > 0,
+      paymentCompletedInboxCount: inboxCount,
+      publicEventId: eventId,
+      posOutboxStatus: outbox?.status ?? null,
+      paymentCompletedPosCount: matchingOutbox.length,
       deliveryAttempts: outbox
-        ? this.attempts.filter((attempt) => attempt.eventId === outbox.id).length
+        ? this.attempts.filter((attempt) => attempt.eventId === outbox.event.id).length
         : 0,
-      mockPosAccepted: eventId ? this.mockPosReceipts.has(eventId) : false,
-      deadLettered: false,
+      mockPosAccepted: receiptCount > 0,
+      matchingMockPosReceiptCount: receiptCount,
+      deadLettered: matchingOutbox.some(({ status }) => status === 'dead_letter'),
     };
   }
   async listPaymentSessionsForReconciliation(limit: number) {

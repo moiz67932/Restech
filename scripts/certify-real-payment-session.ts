@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createInterface } from 'node:readline/promises';
+import { createInterface } from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { signRequest } from '@restec/security';
@@ -15,10 +15,7 @@ type SignedRequest = (
 function sanitizedDiagnosticError(value: unknown) {
   if (typeof value !== 'string') return null;
   return value
-    .replace(
-      /\b(?:track|pps|sec|pk|sk|wh|token)_[A-Za-z0-9_-]+\b/gi,
-      '[redacted]',
-    )
+    .replace(/\b(?:track|pps|sec|pk|sk|wh|token)_[A-Za-z0-9_-]+\b/gi, '[redacted]')
     .replace(/\s+/g, ' ')
     .slice(0, 200);
 }
@@ -129,6 +126,389 @@ const cleanupCommand = (externalBillId: string, currentVersion = 1) =>
   `$env:RESTEC_CERTIFICATION_BILL_VERSION='${currentVersion}'; ` +
   'npm run certify:real-payment-session -- --cleanup';
 
+export const certificationStages = [
+  'bill_created',
+  'payment_session_created',
+  'checkout_opened',
+  'checkout_returned',
+  'safepay_webhook_verified',
+  'paely_paid',
+  'paely_event_delivered',
+  'restec_paid',
+  'pos_event_delivered',
+  'mock_pos_received',
+  'certification_passed',
+] as const;
+
+export type CertificationStage = (typeof certificationStages)[number];
+
+export interface PaelyCertificationEvidence {
+  signature_valid?: boolean;
+  verified?: boolean;
+  processed?: boolean;
+  webhook_signature_valid?: boolean;
+  safepay_webhook_signature_valid?: boolean;
+  webhook_verified?: boolean;
+  safepay_webhook_verified?: boolean;
+  webhook_processed?: boolean;
+  safepay_webhook_processed?: boolean;
+  webhook_processing_status?: string;
+  webhook_processing_error?: string;
+  paely_private_session_status?: string;
+  payment_completed_outbox_exists?: boolean;
+  payment_completed_outbox_count?: number;
+  paely_outbox_delivery_status?: string;
+  paely_outbox_dead_lettered?: boolean;
+  restec_delivery_http_status?: number;
+  dispatcher_status?: string;
+}
+
+export interface RestecCertificationEvidence {
+  payment_session_status?: string;
+  paid_at?: string | null;
+  bill_payment_status?: string | null;
+  private_event_accepted?: boolean;
+  payment_completed_inbox_count?: number;
+  public_event_id?: string | null;
+  pos_outbox_status?: string | null;
+  payment_completed_pos_count?: number;
+  delivery_attempts?: number;
+  mock_pos_accepted?: boolean;
+  matching_mock_pos_receipt_count?: number;
+  dead_lettered?: boolean;
+}
+
+export interface OperatorWaiter {
+  promise: Promise<void>;
+  close: () => void;
+}
+
+export class CertificationCancelledError extends Error {
+  constructor() {
+    super('Certification cancelled.');
+    this.name = 'CertificationCancelledError';
+  }
+}
+
+export class CertificationStateError extends Error {
+  constructor(public readonly code: string) {
+    super(`Certification stopped: ${code}.`);
+    this.name = 'CertificationStateError';
+  }
+}
+
+export function createCertificationCancellationHandler(
+  controller: AbortController,
+  report: (stage: string) => void = (stage) => console.log(JSON.stringify({ stage })),
+) {
+  let cancelled = false;
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    report('certification_cancelled');
+    controller.abort();
+  };
+}
+
+type PublicSessionStatus = {
+  status: string;
+  paid_at?: string | null;
+  external_bill_id?: string;
+};
+
+export interface CertificationMonitorInput {
+  initialStatus: string;
+  timeoutMs: number;
+  operator?: OperatorWaiter;
+  signal?: AbortSignal;
+  readRestecStatus: () => Promise<PublicSessionStatus>;
+  readPaelyEvidence: () => Promise<PaelyCertificationEvidence>;
+  readRestecEvidence: () => Promise<RestecCertificationEvidence>;
+  dispatchPaely?: () => Promise<void>;
+  dispatchRestec: () => Promise<void>;
+  reportStage?: (stage: CertificationStage, details?: Record<string, unknown>) => void;
+  reportDiagnostic?: (diagnostic: Record<string, unknown>) => void;
+  now?: () => number;
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
+
+const safepayWebhookVerified = (evidence: PaelyCertificationEvidence) => {
+  const signatureValid =
+    evidence.safepay_webhook_signature_valid ??
+    evidence.webhook_signature_valid ??
+    evidence.signature_valid;
+  const verified =
+    evidence.safepay_webhook_verified ?? evidence.webhook_verified ?? evidence.verified;
+  const processed =
+    evidence.safepay_webhook_processed ??
+    evidence.webhook_processed ??
+    evidence.processed ??
+    evidence.webhook_processing_status === 'processed';
+  return signatureValid === true && verified === true && processed === true;
+};
+
+const paelyEventDelivered = (evidence: PaelyCertificationEvidence) => {
+  const exists =
+    evidence.payment_completed_outbox_count === 1 ||
+    evidence.payment_completed_outbox_exists === true;
+  const status = evidence.restec_delivery_http_status;
+  return (
+    exists &&
+    evidence.paely_outbox_delivery_status === 'delivered' &&
+    (status === undefined || status === 200 || status === 202)
+  );
+};
+
+const abortableSleep = (milliseconds: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CertificationCancelledError());
+      return;
+    }
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(), milliseconds);
+    const onAbort = () => finish(new CertificationCancelledError());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+const hasProgressed = (
+  initialStatus: string,
+  status: PublicSessionStatus,
+  paely: PaelyCertificationEvidence,
+) =>
+  status.status !== initialStatus ||
+  safepayWebhookVerified(paely) ||
+  paely.paely_private_session_status === 'paid' ||
+  paely.payment_completed_outbox_exists === true ||
+  (paely.payment_completed_outbox_count ?? 0) > 0;
+
+function timeoutDiagnostic(
+  emitted: Set<CertificationStage>,
+  status: PublicSessionStatus,
+  paely: PaelyCertificationEvidence,
+  restec: RestecCertificationEvidence,
+) {
+  const state = (stage: CertificationStage, details: Record<string, unknown> = {}) => ({
+    status: emitted.has(stage) ? 'completed' : 'waiting',
+    ...details,
+  });
+  return {
+    event: 'restec.certification_timeout',
+    stages: {
+      bill_created: state('bill_created'),
+      payment_session_created: state('payment_session_created'),
+      checkout_opened: state('checkout_opened'),
+      checkout_returned: state('checkout_returned'),
+      safepay_webhook_verified: state('safepay_webhook_verified', {
+        signature_valid:
+          paely.safepay_webhook_signature_valid ??
+          paely.webhook_signature_valid ??
+          paely.signature_valid ??
+          false,
+        verified:
+          paely.safepay_webhook_verified ?? paely.webhook_verified ?? paely.verified ?? false,
+        processed:
+          paely.safepay_webhook_processed ??
+          paely.webhook_processed ??
+          paely.processed ??
+          paely.webhook_processing_status === 'processed',
+        error: sanitizedDiagnosticError(paely.webhook_processing_error),
+      }),
+      paely_paid: state('paely_paid', {
+        session_status: paely.paely_private_session_status ?? 'not_observed',
+      }),
+      paely_event_delivered: state('paely_event_delivered', {
+        outbox_count: paely.payment_completed_outbox_count ?? null,
+        delivery_status: paely.paely_outbox_delivery_status ?? 'not_observed',
+        dead_lettered: paely.paely_outbox_dead_lettered ?? false,
+      }),
+      restec_paid: state('restec_paid', {
+        session_status: status.status,
+        paid_at_exists: Boolean(status.paid_at ?? restec.paid_at),
+        inbox_count: restec.payment_completed_inbox_count ?? 0,
+      }),
+      pos_event_delivered: state('pos_event_delivered', {
+        pos_event_count: restec.payment_completed_pos_count ?? 0,
+        delivery_status: restec.pos_outbox_status ?? 'not_observed',
+        dead_lettered: restec.dead_lettered ?? false,
+      }),
+      mock_pos_received: state('mock_pos_received', {
+        receipt_count: restec.matching_mock_pos_receipt_count ?? 0,
+      }),
+      certification_passed: state('certification_passed'),
+    },
+  };
+}
+
+export async function monitorCertification(input: CertificationMonitorInput) {
+  const now = input.now ?? Date.now;
+  const sleep = input.sleep ?? abortableSleep;
+  const reportStage = input.reportStage ?? (() => undefined);
+  const reportDiagnostic = input.reportDiagnostic ?? console.error;
+  const deadline = now() + input.timeoutMs;
+  const progressed = deferred<void>();
+  const emitted = new Set<CertificationStage>([
+    'bill_created',
+    'payment_session_created',
+    'checkout_opened',
+  ]);
+  const reported = new Set<CertificationStage>(emitted);
+  let status: PublicSessionStatus = { status: input.initialStatus };
+  let paely: PaelyCertificationEvidence = {};
+  let restec: RestecCertificationEvidence = {};
+  let progressSettled = false;
+  const pendingReports = new Map<CertificationStage, Record<string, unknown> | undefined>();
+
+  const flushReports = () => {
+    for (const pendingStage of certificationStages) {
+      if (reported.has(pendingStage)) continue;
+      if (!emitted.has(pendingStage)) break;
+      reportStage(pendingStage, pendingReports.get(pendingStage));
+      reported.add(pendingStage);
+      pendingReports.delete(pendingStage);
+    }
+  };
+  const emit = (stage: CertificationStage, details?: Record<string, unknown>) => {
+    if (emitted.has(stage)) return;
+    emitted.add(stage);
+    pendingReports.set(stage, details);
+    flushReports();
+  };
+  const markProgress = () => {
+    if (progressSettled) return;
+    progressSettled = true;
+    progressed.resolve();
+  };
+
+  const poll = async () => {
+    let attempt = 0;
+    try {
+      do {
+        if (input.signal?.aborted) throw new CertificationCancelledError();
+        [status, paely, restec] = await Promise.all([
+          input.readRestecStatus(),
+          input.readPaelyEvidence(),
+          input.readRestecEvidence(),
+        ]);
+        if (hasProgressed(input.initialStatus, status, paely)) markProgress();
+
+        if (safepayWebhookVerified(paely)) emit('safepay_webhook_verified');
+        if (paely.paely_private_session_status === 'paid') emit('paely_paid');
+        if (paely.paely_outbox_dead_lettered === true)
+          throw new CertificationStateError('paely_payment_completed_dead_letter');
+        if ((paely.payment_completed_outbox_count ?? 0) > 1)
+          throw new CertificationStateError('paely_payment_completed_count_mismatch');
+        if (paelyEventDelivered(paely)) emit('paely_event_delivered');
+
+        const inboxCount = restec.payment_completed_inbox_count ?? 0;
+        const posCount = restec.payment_completed_pos_count ?? 0;
+        const receiptCount = restec.matching_mock_pos_receipt_count ?? 0;
+        if (inboxCount > 1) throw new CertificationStateError('duplicate_payment_completed_inbox');
+        if (posCount > 1)
+          throw new CertificationStateError('duplicate_payment_completed_pos_event');
+        if (receiptCount > 1) throw new CertificationStateError('duplicate_mock_pos_receipt');
+        if (restec.dead_lettered === true || restec.pos_outbox_status === 'dead_letter')
+          throw new CertificationStateError('restec_pos_dead_letter');
+
+        const paidAt = status.paid_at ?? restec.paid_at;
+        if (status.status === 'paid' && restec.payment_session_status === 'paid' && Boolean(paidAt))
+          emit('restec_paid', { paid_at_exists: true });
+        if (posCount === 1 && restec.pos_outbox_status === 'delivered') emit('pos_event_delivered');
+        if (receiptCount === 1 && restec.mock_pos_accepted === true) emit('mock_pos_received');
+
+        if (
+          (paely.paely_private_session_status === 'paid' ||
+            paely.payment_completed_outbox_exists === true ||
+            (paely.payment_completed_outbox_count ?? 0) > 0) &&
+          !paelyEventDelivered(paely) &&
+          input.dispatchPaely
+        )
+          await input.dispatchPaely();
+        if (inboxCount === 1 && restec.pos_outbox_status !== 'delivered')
+          await input.dispatchRestec();
+
+        const passed =
+          emitted.has('safepay_webhook_verified') &&
+          emitted.has('paely_paid') &&
+          emitted.has('paely_event_delivered') &&
+          emitted.has('restec_paid') &&
+          inboxCount === 1 &&
+          posCount === 1 &&
+          restec.pos_outbox_status === 'delivered' &&
+          receiptCount === 1 &&
+          restec.mock_pos_accepted === true;
+        if (passed) {
+          markProgress();
+          return { status, paely, restec };
+        }
+        if (['failed', 'expired', 'refunded'].includes(status.status))
+          throw new CertificationStateError(`restec_terminal_${status.status}`);
+        if (now() >= deadline) break;
+        const delay = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5));
+        await sleep(Math.min(delay, Math.max(0, deadline - now())), input.signal);
+      } while (now() <= deadline);
+
+      reportDiagnostic(timeoutDiagnostic(emitted, status, paely, restec));
+      throw new CertificationStateError('timeout');
+    } catch (error) {
+      if (!progressSettled) {
+        progressSettled = true;
+        progressed.reject(error);
+      }
+      throw error;
+    }
+  };
+
+  const monitoring = poll();
+  try {
+    const returnedBy = input.operator
+      ? await Promise.race([
+          input.operator.promise.then(() => 'operator' as const),
+          progressed.promise.then(() => 'automatic' as const),
+        ])
+      : await progressed.promise.then(() => 'automatic' as const);
+    emit('checkout_returned', { detected_by: returnedBy });
+  } catch (error) {
+    try {
+      await monitoring;
+    } catch {
+      // The progress race and monitor carry the same failure; observe both promises once.
+    }
+    throw error;
+  } finally {
+    input.operator?.close();
+  }
+
+  const result = await monitoring;
+  emit('certification_passed', {
+    result: 'PASS',
+    paid_at_exists: true,
+    payment_completed_inbox_count: result.restec.payment_completed_inbox_count,
+    payment_completed_pos_count: result.restec.payment_completed_pos_count,
+    matching_mock_pos_receipt_count: result.restec.matching_mock_pos_receipt_count,
+  });
+  return result;
+}
+
 export async function createPaymentSessionWithCleanup(input: {
   signedRequest: SignedRequest;
   createPath: string;
@@ -230,6 +610,8 @@ export async function main() {
   const verifyOnly = process.argv.includes('--verify');
   const cleanupOnly = process.argv.includes('--cleanup');
   const timeoutMs = Number(process.env.RESTEC_CERTIFICATION_TIMEOUT_SECONDS ?? 900) * 1000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new Error('RESTEC_CERTIFICATION_TIMEOUT_SECONDS must be a positive number.');
 
   const failure = async (operation: string, response: Response): Promise<never> => {
     let code = 'unknown_error';
@@ -363,8 +745,10 @@ export async function main() {
 
   let externalBillId = process.env.RESTEC_CERTIFICATION_EXTERNAL_BILL_ID ?? '';
   let paymentSessionId = process.env.RESTEC_CERTIFICATION_PAYMENT_SESSION_ID ?? '';
-  let checkoutOrigin = baseUrl.origin;
   let initialStatus = 'unknown';
+  let operator: OperatorWaiter | undefined;
+  const reportStage = (stage: CertificationStage, details: Record<string, unknown> = {}) =>
+    console.log(JSON.stringify({ stage, ...details }));
 
   if (!verifyOnly) {
     const suffix = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
@@ -372,6 +756,7 @@ export async function main() {
     const billPath = `/v1/locations/${encodeURIComponent(locationId)}/bills/${encodeURIComponent(externalBillId)}`;
     const billBody = certificationBillBody(externalTableId, 1);
     await signedRequest('PUT', billPath, billBody, `cert-bill-${suffix}`, 'bill_upsert');
+    reportStage('bill_created', { bill_id: externalBillId });
     const createPath = `${billPath}/payment-sessions`;
     const created = await createPaymentSessionWithCleanup({
       signedRequest,
@@ -392,17 +777,27 @@ export async function main() {
     paymentSessionId = created.paymentSessionId;
     initialStatus = created.status;
     const checkout = created.checkout;
-    checkoutOrigin = checkout.origin;
-    console.log(`Restec checkout URL: ${checkout.toString()}`);
+    reportStage('payment_session_created', { payment_session_id: paymentSessionId });
+    console.log(
+      `Open this Restec sandbox checkout URL and manually complete payment:\n${checkout.toString()}`,
+    );
+    reportStage('checkout_opened');
     if (!process.argv.includes('--no-wait')) {
       const prompt = createInterface({ input: stdin, output: stdout });
-      try {
-        await prompt.question(
-          'Open that URL and manually complete the sandbox hosted checkout. Press Enter afterward.',
-        );
-      } finally {
-        prompt.close();
-      }
+      let closed = false;
+      operator = {
+        promise: new Promise<void>((resolve) => {
+          prompt.question(
+            'Press Enter after checkout returns; automatic detection is also active.\n',
+            () => resolve(),
+          );
+        }),
+        close: () => {
+          if (closed) return;
+          closed = true;
+          prompt.close();
+        },
+      };
     }
   } else if (!paymentSessionId) {
     throw new Error('Set RESTEC_CERTIFICATION_PAYMENT_SESSION_ID for --verify mode.');
@@ -410,149 +805,121 @@ export async function main() {
     initialStatus = required('RESTEC_CERTIFICATION_INITIAL_STATUS');
     if (initialStatus !== 'requires_customer_action')
       throw new Error('--verify requires preserved evidence of the initial customer-action state.');
+    reportStage('bill_created', { source: 'preserved_evidence' });
+    reportStage('payment_session_created', {
+      payment_session_id: paymentSessionId,
+      source: 'preserved_evidence',
+    });
+    reportStage('checkout_opened', { source: 'preserved_evidence' });
   }
 
   const statusPath = `/v1/locations/${encodeURIComponent(locationId)}/payment-sessions/${encodeURIComponent(paymentSessionId)}`;
-  const deadline = Date.now() + timeoutMs;
   const jobToken = required('RESTEC_INTERNAL_JOB_TOKEN');
-  const timeoutDiagnostics = async () => {
-    let paely: Record<string, unknown> = {};
-    const paelyDiagnosticsBase =
-      process.env.PAELY_CERTIFICATION_DIAGNOSTICS_BASE_URL;
-    const paelyDiagnosticsToken =
-      process.env.PAELY_CERTIFICATION_DIAGNOSTICS_TOKEN;
-    if (paelyDiagnosticsBase && paelyDiagnosticsToken) {
-      try {
-        const response = await fetch(
-          new URL(
-            `/api/internal/integrations/restec/v1/certification/payment-sessions/${encodeURIComponent(paymentSessionId)}/diagnostics`,
-            paelyDiagnosticsBase,
-          ),
-          {
-            headers: {
-              Authorization: `Bearer ${paelyDiagnosticsToken}`,
-            },
-          },
-        );
-        if (response.ok) paely = (await response.json()) as Record<string, unknown>;
-      } catch {
-        paely = {};
-      }
-    }
-    let restec: Record<string, unknown> = {};
-    try {
-      const response = await fetch(
-        new URL(
-          `/api/internal/test/payment-sessions/${encodeURIComponent(paymentSessionId)}/evidence`,
-          baseUrl,
-        ),
-        { headers: { Authorization: `Bearer ${jobToken}` } },
-      );
-      if (response.ok) restec = (await response.json()) as Record<string, unknown>;
-    } catch {
-      restec = {};
-    }
-    console.error(
-      JSON.stringify({
-        event: 'restec.certification_timeout',
-        paely_private_session_status:
-          paely.paely_private_session_status ?? finalStatus,
-        webhook_processing_status:
-          paely.webhook_processing_status ?? 'not_observed',
-        webhook_processing_error: sanitizedDiagnosticError(
-          paely.webhook_processing_error,
-        ),
-        payment_completed_outbox_exists:
-          paely.payment_completed_outbox_exists ?? false,
-        paely_outbox_delivery_status:
-          paely.paely_outbox_delivery_status ?? 'not_observed',
-        restec_event_inbox_status:
-          restec.private_event_accepted === true ? 'accepted' : 'not_observed',
-        pos_dispatch_status:
-          restec.pos_outbox_status ?? 'not_observed',
-      }),
-    );
-  };
-  let finalStatus = 'unknown';
-  while (Date.now() < deadline) {
-    const response = await signedRequest('GET', statusPath);
-    const status = (await response.json()) as {
-      status: string;
-      external_bill_id: string;
-    };
-    finalStatus = status.status;
-    externalBillId ||= status.external_bill_id;
-    if (finalStatus === 'paid') break;
-    if (['failed', 'expired', 'refunded'].includes(finalStatus))
-      throw new Error(`Certification stopped in terminal state ${finalStatus}.`);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-  if (finalStatus !== 'paid') {
-    await timeoutDiagnostics();
-    throw new Error('Timed out waiting for authoritative paid state.');
-  }
-
-  const dispatch = await fetch(new URL('/api/internal/jobs/dispatch-pos-events', baseUrl), {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${jobToken}`, 'Content-Type': 'application/json' },
-  });
-  if (!dispatch.ok) await failure('POS event dispatcher', dispatch);
-
-  let evidence: any;
-  while (Date.now() < deadline) {
-    const response = await fetch(
-      new URL(
-        `/api/internal/test/payment-sessions/${encodeURIComponent(paymentSessionId)}/evidence`,
-        baseUrl,
-      ),
-      { headers: { Authorization: `Bearer ${jobToken}` } },
-    );
-    if (!response.ok) await failure('certification evidence', response);
-    evidence = await response.json();
-    if (evidence.pos_outbox_status === 'delivered' && evidence.mock_pos_accepted) break;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-  if (
-    evidence?.pos_outbox_status !== 'delivered' ||
-    evidence?.mock_pos_accepted !== true
-  ) {
-    await timeoutDiagnostics();
-  }
-
-  const passed =
-    initialStatus === 'requires_customer_action' &&
-    finalStatus === 'paid' &&
-    evidence?.private_event_accepted === true &&
-    evidence?.bill_payment_status === 'paid' &&
-    evidence?.pos_outbox_status === 'delivered' &&
-    evidence?.mock_pos_accepted === true &&
-    evidence?.dead_lettered === false;
-  console.log(
-    JSON.stringify(
-      {
-        result: passed ? 'PASS' : 'FAIL',
-        bill_id: externalBillId,
-        payment_session_id: paymentSessionId,
-        checkout_origin: checkoutOrigin,
-        initial_status: initialStatus,
-        final_status: finalStatus,
-        private_event_accepted: evidence?.private_event_accepted ?? false,
-        bill_projection_paid: evidence?.bill_payment_status === 'paid',
-        pos_outbox_delivered: evidence?.pos_outbox_status === 'delivered',
-        dummy_pos_accepted: evidence?.mock_pos_accepted ?? false,
-        webhook_signature_verified: evidence?.mock_pos_accepted ?? false,
-        delivery_attempts: evidence?.delivery_attempts ?? null,
-        dead_lettered: evidence?.dead_lettered ?? null,
-      },
-      null,
-      2,
-    ),
+  const evidenceUrl = new URL(
+    `/api/internal/test/payment-sessions/${encodeURIComponent(paymentSessionId)}/evidence`,
+    baseUrl,
   );
-  if (!passed) process.exitCode = 1;
+  const paelyBaseValue = process.env.PAELY_CERTIFICATION_DIAGNOSTICS_BASE_URL;
+  const paelyToken = process.env.PAELY_CERTIFICATION_DIAGNOSTICS_TOKEN;
+  const paelyBase = paelyBaseValue ? new URL(paelyBaseValue) : undefined;
+  if (paelyBase && paelyBase.protocol !== 'https:')
+    throw new Error('The Paely certification base URL must use HTTPS.');
+  const paelyDiagnosticsUrl = paelyBase
+    ? new URL(
+        `/api/internal/integrations/restec/v1/certification/payment-sessions/${encodeURIComponent(paymentSessionId)}/diagnostics`,
+        paelyBase,
+      )
+    : undefined;
+  const paelyDispatchPath =
+    process.env.PAELY_CERTIFICATION_DISPATCH_PATH ??
+    '/api/internal/integrations/restec/v1/jobs/dispatch-outbox';
+  if (!paelyDispatchPath.startsWith('/') || paelyDispatchPath.startsWith('//'))
+    throw new Error('PAELY_CERTIFICATION_DISPATCH_PATH must be an absolute path.');
+  const paelyDispatchUrl = paelyBase ? new URL(paelyDispatchPath, paelyBase) : undefined;
+
+  const readPaelyEvidence = async () => {
+    if (!paelyDiagnosticsUrl || !paelyToken)
+      return { dispatcher_status: 'credentials_not_configured' };
+    const response = await fetch(paelyDiagnosticsUrl, {
+      headers: { Authorization: `Bearer ${paelyToken}` },
+    });
+    if (!response.ok) return { dispatcher_status: `diagnostics_http_${response.status}` };
+    return (await response.json()) as PaelyCertificationEvidence;
+  };
+  const readRestecEvidence = async () => {
+    const response = await fetch(evidenceUrl, {
+      headers: { Authorization: `Bearer ${jobToken}` },
+    });
+    if (!response.ok) await failure('certification evidence', response);
+    return (await response.json()) as RestecCertificationEvidence;
+  };
+  const dispatchRestec = async () => {
+    const response = await fetch(new URL('/api/internal/jobs/dispatch-pos-events', baseUrl), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${jobToken}`, 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) await failure('POS event dispatcher', response);
+  };
+  const dispatchPaely =
+    paelyDispatchUrl && paelyToken
+      ? async () => {
+          const response = await fetch(paelyDispatchUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${paelyToken}`,
+              'Content-Type': 'application/json',
+            },
+          });
+          if (!response.ok)
+            throw new CertificationHttpError(
+              'Paely integration outbox dispatcher',
+              response.status,
+              'dispatcher_rejected',
+              undefined,
+              response.status >= 500,
+            );
+        }
+      : undefined;
+
+  const abortController = new AbortController();
+  const onSigint = createCertificationCancellationHandler(abortController);
+  process.once('SIGINT', onSigint);
+  try {
+    try {
+      await monitorCertification({
+        initialStatus,
+        timeoutMs,
+        operator,
+        signal: abortController.signal,
+        readRestecStatus: async () => {
+          const response = await signedRequest('GET', statusPath);
+          const status = (await response.json()) as PublicSessionStatus;
+          externalBillId ||= status.external_bill_id ?? '';
+          return status;
+        },
+        readPaelyEvidence,
+        readRestecEvidence,
+        dispatchPaely,
+        dispatchRestec,
+        reportStage,
+        reportDiagnostic: (diagnostic) => console.error(JSON.stringify(diagnostic, null, 2)),
+      });
+    } catch (error) {
+      if (abortController.signal.aborted) throw new CertificationCancelledError();
+      throw error;
+    }
+  } finally {
+    operator?.close();
+    process.removeListener('SIGINT', onSigint);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void main().catch((error: unknown) => {
+    if (error instanceof CertificationCancelledError) {
+      process.exitCode = 130;
+      return;
+    }
     console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
     process.exitCode = 1;
   });

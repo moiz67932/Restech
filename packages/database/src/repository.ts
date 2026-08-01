@@ -209,12 +209,16 @@ export interface MockPosReceipt {
 }
 export interface PaymentSessionCertificationEvidence {
   paymentSessionStatus: PaymentSessionStatus;
+  paidAt: string | null;
   billPaymentStatus: string | null;
   privateEventAccepted: boolean;
+  paymentCompletedInboxCount: number;
   publicEventId: string | null;
   posOutboxStatus: string | null;
+  paymentCompletedPosCount: number;
   deliveryAttempts: number;
   mockPosAccepted: boolean;
+  matchingMockPosReceiptCount: number;
   deadLettered: boolean;
 }
 export interface RestecRepository {

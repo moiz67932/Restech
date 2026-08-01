@@ -2,11 +2,52 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CertificationHttpError,
+  CertificationCancelledError,
+  CertificationStateError,
   assertCertificationTableAvailable,
   certificationBillBody,
+  certificationStages,
   cleanupCertificationBill,
+  createCertificationCancellationHandler,
   createPaymentSessionWithCleanup,
+  monitorCertification,
+  type PaelyCertificationEvidence,
+  type RestecCertificationEvidence,
 } from './certify-real-payment-session.js';
+
+const paidStatus = {
+  status: 'paid',
+  paid_at: '2026-08-01T00:00:00.000Z',
+  external_bill_id: 'CERT-test',
+};
+
+const verifiedPaely = (overrides: PaelyCertificationEvidence = {}) => ({
+  signature_valid: true,
+  verified: true,
+  processed: true,
+  paely_private_session_status: 'paid',
+  payment_completed_outbox_count: 1,
+  paely_outbox_delivery_status: 'delivered',
+  restec_delivery_http_status: 202,
+  paely_outbox_dead_lettered: false,
+  ...overrides,
+});
+
+const deliveredRestec = (overrides: RestecCertificationEvidence = {}) => ({
+  payment_session_status: 'paid',
+  paid_at: '2026-08-01T00:00:00.000Z',
+  bill_payment_status: 'paid',
+  private_event_accepted: true,
+  payment_completed_inbox_count: 1,
+  public_event_id: 'evt_test',
+  pos_outbox_status: 'delivered',
+  payment_completed_pos_count: 1,
+  delivery_attempts: 1,
+  mock_pos_accepted: true,
+  matching_mock_pos_receipt_count: 1,
+  dead_lettered: false,
+  ...overrides,
+});
 
 test('table preflight rejects an unmapped external table before bill creation', () => {
   assert.throws(
@@ -178,4 +219,203 @@ test('certificationBillBody preserves financial values when cancelling', () => {
   assert.deepEqual(cancelled.totals, open.totals);
   assert.equal(cancelled.external_table_id, open.external_table_id);
   assert.equal(cancelled.status, 'cancelled');
+});
+
+test('automatic progression succeeds without Enter and invokes configured dispatchers', async () => {
+  const stages: string[] = [];
+  let poll = -1;
+  let operatorCloses = 0;
+  let paelyDispatches = 0;
+  let restecDispatches = 0;
+  const neverEnter = new Promise<void>(() => undefined);
+
+  await monitorCertification({
+    initialStatus: 'requires_customer_action',
+    timeoutMs: 1_000,
+    operator: {
+      promise: neverEnter,
+      close: () => operatorCloses++,
+    },
+    readRestecStatus: async () => {
+      poll++;
+      return paidStatus;
+    },
+    readPaelyEvidence: async () =>
+      poll === 0 ? verifiedPaely({ paely_outbox_delivery_status: 'pending' }) : verifiedPaely(),
+    readRestecEvidence: async () =>
+      poll === 0
+        ? deliveredRestec({
+            pos_outbox_status: 'pending',
+            mock_pos_accepted: false,
+            matching_mock_pos_receipt_count: 0,
+          })
+        : deliveredRestec(),
+    dispatchPaely: async () => {
+      paelyDispatches++;
+    },
+    dispatchRestec: async () => {
+      restecDispatches++;
+    },
+    reportStage: (stage) => stages.push(stage),
+    sleep: async () => undefined,
+  });
+
+  assert.equal(operatorCloses, 1);
+  assert.equal(paelyDispatches, 1);
+  assert.equal(restecDispatches, 1);
+  assert.deepEqual(stages, certificationStages.slice(3));
+});
+
+test('operator Enter wins the safe race and success still waits for authoritative evidence', async () => {
+  const reports: Array<{ stage: string; detectedBy?: unknown }> = [];
+  let closes = 0;
+  await monitorCertification({
+    initialStatus: 'requires_customer_action',
+    timeoutMs: 1_000,
+    operator: { promise: Promise.resolve(), close: () => closes++ },
+    readRestecStatus: async () => paidStatus,
+    readPaelyEvidence: async () => verifiedPaely(),
+    readRestecEvidence: async () => deliveredRestec(),
+    dispatchRestec: async () => undefined,
+    reportStage: (stage, details) => reports.push({ stage, detectedBy: details?.detected_by }),
+  });
+  assert.equal(closes, 1);
+  assert.equal(reports[0]?.stage, 'checkout_returned');
+  assert.equal(reports[0]?.detectedBy, 'operator');
+  assert.equal(reports.at(-1)?.stage, 'certification_passed');
+});
+
+test('timeout prints sanitized state for every certification stage', async () => {
+  let clock = 0;
+  const diagnostics: Array<Record<string, any>> = [];
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1,
+      operator: { promise: Promise.resolve(), close: () => undefined },
+      readRestecStatus: async () => ({ status: 'requires_customer_action' }),
+      readPaelyEvidence: async () => ({ webhook_processing_error: 'token_secret-value' }),
+      readRestecEvidence: async () => ({}),
+      dispatchRestec: async () => undefined,
+      reportDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+      },
+    }),
+    (error: unknown) => error instanceof CertificationStateError && error.code === 'timeout',
+  );
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(Object.keys(diagnostics[0]?.stages ?? {}), certificationStages);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /secret-value/);
+});
+
+test('SIGINT cancellation closes the operator resource exactly once', async () => {
+  const controller = new AbortController();
+  const reports: string[] = [];
+  const onSigint = createCertificationCancellationHandler(controller, (stage) =>
+    reports.push(stage),
+  );
+  onSigint();
+  onSigint();
+  let closes = 0;
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      operator: {
+        promise: new Promise<void>(() => undefined),
+        close: () => closes++,
+      },
+      readRestecStatus: async () => ({ status: 'requires_customer_action' }),
+      readPaelyEvidence: async () => ({}),
+      readRestecEvidence: async () => ({}),
+      dispatchRestec: async () => undefined,
+    }),
+    CertificationCancelledError,
+  );
+  assert.equal(closes, 1);
+  assert.deepEqual(reports, ['certification_cancelled']);
+});
+
+test('duplicate payment.completed inbox evidence fails certification', async () => {
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1_000,
+      readRestecStatus: async () => paidStatus,
+      readPaelyEvidence: async () => verifiedPaely(),
+      readRestecEvidence: async () => deliveredRestec({ payment_completed_inbox_count: 2 }),
+      dispatchRestec: async () => undefined,
+    }),
+    (error: unknown) =>
+      error instanceof CertificationStateError &&
+      error.code === 'duplicate_payment_completed_inbox',
+  );
+});
+
+test('a missing matching POS receipt times out without passing', async () => {
+  let clock = 0;
+  const stages: string[] = [];
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1,
+      operator: { promise: Promise.resolve(), close: () => undefined },
+      readRestecStatus: async () => paidStatus,
+      readPaelyEvidence: async () => verifiedPaely(),
+      readRestecEvidence: async () =>
+        deliveredRestec({
+          mock_pos_accepted: false,
+          matching_mock_pos_receipt_count: 0,
+        }),
+      dispatchRestec: async () => undefined,
+      reportStage: (stage) => stages.push(stage),
+      reportDiagnostic: () => undefined,
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+      },
+    }),
+    (error: unknown) => error instanceof CertificationStateError && error.code === 'timeout',
+  );
+  assert.equal(stages.includes('mock_pos_received'), false);
+  assert.equal(stages.includes('certification_passed'), false);
+});
+
+test('Paely payment.completed dead letter fails certification', async () => {
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1_000,
+      readRestecStatus: async () => paidStatus,
+      readPaelyEvidence: async () =>
+        verifiedPaely({
+          paely_outbox_delivery_status: 'dead_letter',
+          paely_outbox_dead_lettered: true,
+        }),
+      readRestecEvidence: async () => deliveredRestec(),
+      dispatchRestec: async () => undefined,
+    }),
+    (error: unknown) =>
+      error instanceof CertificationStateError &&
+      error.code === 'paely_payment_completed_dead_letter',
+  );
+});
+
+test('Restec POS dead letter fails certification', async () => {
+  await assert.rejects(
+    monitorCertification({
+      initialStatus: 'requires_customer_action',
+      timeoutMs: 1_000,
+      readRestecStatus: async () => paidStatus,
+      readPaelyEvidence: async () => verifiedPaely(),
+      readRestecEvidence: async () =>
+        deliveredRestec({ pos_outbox_status: 'dead_letter', dead_lettered: true }),
+      dispatchRestec: async () => undefined,
+    }),
+    (error: unknown) =>
+      error instanceof CertificationStateError && error.code === 'restec_pos_dead_letter',
+  );
 });

@@ -703,12 +703,16 @@ export function createApp(deps: {
     return c.json({
       payment_session_id: c.req.param('paymentSessionId'),
       payment_session_status: evidence.paymentSessionStatus,
+      paid_at: evidence.paidAt,
       bill_payment_status: evidence.billPaymentStatus,
       private_event_accepted: evidence.privateEventAccepted,
+      payment_completed_inbox_count: evidence.paymentCompletedInboxCount,
       public_event_id: evidence.publicEventId,
       pos_outbox_status: evidence.posOutboxStatus,
+      payment_completed_pos_count: evidence.paymentCompletedPosCount,
       delivery_attempts: evidence.deliveryAttempts,
       mock_pos_accepted: evidence.mockPosAccepted,
+      matching_mock_pos_receipt_count: evidence.matchingMockPosReceiptCount,
       dead_lettered: evidence.deadLettered,
     });
   });
