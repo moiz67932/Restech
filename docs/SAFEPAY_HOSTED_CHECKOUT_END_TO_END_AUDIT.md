@@ -102,20 +102,20 @@ The important architectural fact is that Safepay does **not** webhook RESTEC dir
 
 ### Safepay/canonical provider state
 
-| State | Class | Allowed progression |
-|---|---|---|
-| `INITIATED` | active | `REQUIRES_ACTION`, `PROCESSING`, `AUTHORIZED`, success, or failure terminal |
-| `REQUIRES_ACTION` | active | `PROCESSING`, `AUTHORIZED`, success, or failure terminal |
-| `PROCESSING` | active | `AUTHORIZED`, success, or failure terminal |
-| `AUTHORIZED` | active for captured checkout; terminal for auth-only certification | success or failure terminal |
-| `PAID` | success | `SETTLED`, `PARTIALLY_REFUNDED`, `REFUNDED`, or `DISPUTED` |
-| `SETTLED` | success | `PARTIALLY_REFUNDED`, `REFUNDED`, or `DISPUTED` |
-| `FAILED` | failure terminal | same state, or late authoritative `PAID` |
-| `CANCELLED` | failure terminal | same state, or late authoritative `PAID` |
-| `EXPIRED` | failure terminal | same state, or late authoritative `PAID` |
-| `PARTIALLY_REFUNDED` | post-payment terminal for checkout | same state or `REFUNDED` |
-| `REFUNDED` | terminal | same state only |
-| `DISPUTED` | post-settlement exception | same state; RESTEC contract escalation is manual review |
+| State                | Class                                                              | Allowed progression                                                         |
+| -------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `INITIATED`          | active                                                             | `REQUIRES_ACTION`, `PROCESSING`, `AUTHORIZED`, success, or failure terminal |
+| `REQUIRES_ACTION`    | active                                                             | `PROCESSING`, `AUTHORIZED`, success, or failure terminal                    |
+| `PROCESSING`         | active                                                             | `AUTHORIZED`, success, or failure terminal                                  |
+| `AUTHORIZED`         | active for captured checkout; terminal for auth-only certification | success or failure terminal                                                 |
+| `PAID`               | success                                                            | `SETTLED`, `PARTIALLY_REFUNDED`, `REFUNDED`, or `DISPUTED`                  |
+| `SETTLED`            | success                                                            | `PARTIALLY_REFUNDED`, `REFUNDED`, or `DISPUTED`                             |
+| `FAILED`             | failure terminal                                                   | same state, or late authoritative `PAID`                                    |
+| `CANCELLED`          | failure terminal                                                   | same state, or late authoritative `PAID`                                    |
+| `EXPIRED`            | failure terminal                                                   | same state, or late authoritative `PAID`                                    |
+| `PARTIALLY_REFUNDED` | post-payment terminal for checkout                                 | same state or `REFUNDED`                                                    |
+| `REFUNDED`           | terminal                                                           | same state only                                                             |
+| `DISPUTED`           | post-settlement exception                                          | same state; RESTEC contract escalation is manual review                     |
 
 Late verified success is intentionally allowed from `FAILED`, `CANCELLED`, or `EXPIRED`: a customer return or local clock must never override authoritative provider evidence. Stale polling results are compare-and-swap updates and cannot regress a newer state.
 
@@ -137,16 +137,16 @@ Late verified success is intentionally allowed from `FAILED`, `CANCELLED`, or `E
 
 ### Paely payment attempt projection
 
-| Provider/session result | Attempt status |
-|---|---|
-| provider request durably prepared | `PREPARED` |
-| customer action required | `REQUIRES_ACTION` |
-| processing or authorized | `PROCESSING` |
-| paid or settled | `SUCCEEDED` |
-| failed | `FAILED` |
-| cancelled | `CANCELLED` |
-| expired | `EXPIRED` |
-| partial/full refund | `PARTIALLY_REFUNDED` / `REFUNDED` |
+| Provider/session result           | Attempt status                    |
+| --------------------------------- | --------------------------------- |
+| provider request durably prepared | `PREPARED`                        |
+| customer action required          | `REQUIRES_ACTION`                 |
+| processing or authorized          | `PROCESSING`                      |
+| paid or settled                   | `SUCCEEDED`                       |
+| failed                            | `FAILED`                          |
+| cancelled                         | `CANCELLED`                       |
+| expired                           | `EXPIRED`                         |
+| partial/full refund               | `PARTIALLY_REFUNDED` / `REFUNDED` |
 
 ### RESTEC public payment session
 
@@ -156,47 +156,47 @@ States are `creating`, `requires_customer_action`, `processing`, `paid`, `failed
 
 ## Polling and retry inventory
 
-| Poller/job | Interval | Exit/limit | Failure behavior |
-|---|---:|---|---|
-| Paely `PaymentPage` status poll | 4 seconds | all backend terminal statuses; 15-minute deadline; abort on unmount or replacement | visible timeout error; overlay cleared in `finally` |
-| Paely embedded card confirmation | 2 seconds | all backend terminal statuses; 60-second deadline; abort on unmount or replacement | visible failure/timeout callback |
-| RESTEC return page | configured seconds | terminal state or local `expires_at` | terminal HTML has no refresh tag |
-| Paely RESTEC outbox | scheduled every minute | delivered; max attempts; max age | transient retry with lease/backoff; permanent 4xx dead-letter |
-| Verified Safepay webhook recovery | scheduled every 5 minutes | processed or 10 attempts by default | exponential backoff, then `manual_review` |
-| Missing-webhook provider reconciliation | scheduled every 5 minutes | terminal provider state, session expiry, or 10 attempts by default | explicit `reconciliation_exhausted_at` and safe error code |
-| RESTEC POS outbox | scheduled every minute | delivered or configured max attempts | leased transient retry; permanent failures dead-letter |
-| RESTEC payment-session comparison | scheduled every 5 minutes | active set ends at terminal/expiry | mismatch is audited; no partial financial write |
+| Poller/job                              |                  Interval | Exit/limit                                                                         | Failure behavior                                              |
+| --------------------------------------- | ------------------------: | ---------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Paely `PaymentPage` status poll         |                 4 seconds | all backend terminal statuses; 15-minute deadline; abort on unmount or replacement | visible timeout error; overlay cleared in `finally`           |
+| Paely embedded card confirmation        |                 2 seconds | all backend terminal statuses; 60-second deadline; abort on unmount or replacement | visible failure/timeout callback                              |
+| RESTEC return page                      |        configured seconds | terminal state or local `expires_at`                                               | terminal HTML has no refresh tag                              |
+| Paely RESTEC outbox                     |    scheduled every minute | delivered; max attempts; max age                                                   | transient retry with lease/backoff; permanent 4xx dead-letter |
+| Verified Safepay webhook recovery       | scheduled every 5 minutes | processed or 10 attempts by default                                                | exponential backoff, then `manual_review`                     |
+| Missing-webhook provider reconciliation | scheduled every 5 minutes | terminal provider state, session expiry, or 10 attempts by default                 | explicit `reconciliation_exhausted_at` and safe error code    |
+| RESTEC POS outbox                       |    scheduled every minute | delivered or configured max attempts                                               | leased transient retry; permanent failures dead-letter        |
+| RESTEC payment-session comparison       | scheduled every 5 minutes | active set ends at terminal/expiry                                                 | mismatch is audited; no partial financial write               |
 
 Paely outbox delays are bounded at 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, 6 hours, then 12 hours, with maximum attempt and event-age checks. Claiming and delivery use leases, so a crashed worker is reclaimable.
 
 ## Discovered defects and applied fixes
 
-| ID | Defect | Effect | Applied change |
-|---|---|---|---|
-| F-01 | Paely canonical outbox had no active scheduler | Paely was paid while RESTEC remained `requires_customer_action` | Added Vercel cron, GET-capable protected job route, and GitHub Actions fallback |
-| F-02 | RESTEC terminal return page always emitted a refresh tag | Infinite terminal browser polling and repeated logs | Refresh only for active sessions; all terminal/locally expired states render once |
-| F-03 | Generic payment trigger emitted a second event for hosted-session payments | Duplicate events raced; legacy generic events were rejected by RESTEC | Hosted payments are excluded from the generic trigger; pending legacy duplicates are quarantined as dead-letter evidence |
-| F-04 | Missing immutable destination fields could be treated as a matching route | Legacy/unscoped outbox rows could reach the current RESTEC receiver | Destination environment, service, origin, and path must all be present and exact |
-| F-05 | Verified-but-unprocessed webhooks had only a manual CLI recovery path | A transient post-verification failure could remain forever | Added leased scheduled claims, bounded exponential retries, and manual-review exhaustion |
-| F-06 | No recovery existed when a Safepay webhook/callback never arrived | Active session could remain initiated/processing forever | Added exact-merchant authenticated reporter lookup and durable `provider_status_api` evidence using the same atomic commit path |
-| F-07 | Claimed webhook rows could remain `processing` after a worker crash | Retry worker could strand its own claim | Stale `processing` rows become reclaimable after their lease/backoff timestamp |
-| F-08 | Session provider reconciliation had no maximum attempt count | Background retry could continue forever | Added a configurable cap and `reconciliation_exhausted_at` marker |
-| F-09 | Stale provider polling could overwrite newer canonical states | Webhook success could regress to processing/failure | Added compare-and-swap predecessor sets and logs for ignored stale updates |
-| F-10 | Several financial database errors and recovery persistence errors were unchecked or swallowed | Execution could stop after partial application with weak diagnostics | All relevant reads/writes are checked; catches log sanitized type/code and persist retryable/manual state |
-| F-11 | RESTEC accepted an empty RPC result as a successful canonical event commit | Event could be acknowledged without a proven transaction result | Empty/incomplete RPC results now fail closed |
-| F-12 | RESTEC reconciliation wrote only the session for remote terminal mismatch/expiry | Bill/order/POS projection could remain stale | Terminal mismatch is audited and left to the atomic canonical event pipeline |
-| F-13 | Visiting Safepay's cancel return URL was treated as provider cancellation | A browser navigation could overwrite financial truth | Cancel return is audit-only; only verified provider evidence changes payment state |
-| F-14 | Provider `CANCELLED` became session/attempt `failed`/`FAILED` | Cancellation semantics and polling decisions were lost | Preserve `cancelled` and `CANCELLED` while retaining the compatible outward failure event |
-| F-15 | Linked payment attempts stayed `PREPARED` through later provider states and logs reported the stale value | Database and observability disagreed with the payment/session | Added truthful attempt mappings for action, processing, terminal, and refund states |
-| F-16 | Frontend polling could overlap, survive unmount, or time out silently | Duplicate requests and post-navigation state updates | Abort previous/unmounted polls, handle every terminal status, and surface bounded timeout errors |
-| F-17 | RESTEC checkout expiry/cancel paths performed session-only financial mutations | Partial projections and races with webhook delivery | Removed browser-driven financial mutations; expiry is projected by Paely's atomic expiry/outbox path |
-| F-18 | RESTEC POS dispatch and session reconciliation had no deployment scheduler | POS delivery and missing-event diagnosis depended on manual calls | Added Vercel cron and GitHub Actions fallback |
-| F-19 | Certification default pointed at a nonexistent Paely dispatcher path | Certification could time out despite valid code | Corrected to `/api/internal/integrations/restec/v1/outbox/dispatch` |
-| F-20 | `AUTHORIZED` existed in TypeScript but not the PostgreSQL provider enum | Authorized updates could fail at the database boundary | Migration adds `AUTHORIZED` to `payment_provider_status` |
-| F-21 | Dispatcher auth preferred one secret with `A || B` | Vercel `CRON_SECRET` failed whenever a different operator token was also configured | Constant-time validation accepts either configured server-side secret |
-| F-22 | Webhook logs stopped at verification and did not guarantee correlation fields | Failures after verification were hard to locate | Added structured stage logs with complete nullable correlation context and duration |
-| F-23 | RESTEC job catches and global handler hid the error class | Operators saw a generic 500 without a safe cause | Added sanitized structured error classification and job summaries |
-| F-24 | New-order checkout called the session store with a database session ID where a session token was required | Session identity could be corrupted after order creation | Removed the invalid write; `ensureCustomerSession` remains the single token/ID owner |
+| ID   | Defect                                                                                                    | Effect                                                                | Applied change                                                                                                                  |
+| ---- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| F-01 | Paely canonical outbox had no active scheduler                                                            | Paely was paid while RESTEC remained `requires_customer_action`       | Added Vercel cron, GET-capable protected job route, and GitHub Actions fallback                                                 |
+| F-02 | RESTEC terminal return page always emitted a refresh tag                                                  | Infinite terminal browser polling and repeated logs                   | Refresh only for active sessions; all terminal/locally expired states render once                                               |
+| F-03 | Generic payment trigger emitted a second event for hosted-session payments                                | Duplicate events raced; legacy generic events were rejected by RESTEC | Hosted payments are excluded from the generic trigger; pending legacy duplicates are quarantined as dead-letter evidence        |
+| F-04 | Missing immutable destination fields could be treated as a matching route                                 | Legacy/unscoped outbox rows could reach the current RESTEC receiver   | Destination environment, service, origin, and path must all be present and exact                                                |
+| F-05 | Verified-but-unprocessed webhooks had only a manual CLI recovery path                                     | A transient post-verification failure could remain forever            | Added leased scheduled claims, bounded exponential retries, and manual-review exhaustion                                        |
+| F-06 | No recovery existed when a Safepay webhook/callback never arrived                                         | Active session could remain initiated/processing forever              | Added exact-merchant authenticated reporter lookup and durable `provider_status_api` evidence using the same atomic commit path |
+| F-07 | Claimed webhook rows could remain `processing` after a worker crash                                       | Retry worker could strand its own claim                               | Stale `processing` rows become reclaimable after their lease/backoff timestamp                                                  |
+| F-08 | Session provider reconciliation had no maximum attempt count                                              | Background retry could continue forever                               | Added a configurable cap and `reconciliation_exhausted_at` marker                                                               |
+| F-09 | Stale provider polling could overwrite newer canonical states                                             | Webhook success could regress to processing/failure                   | Added compare-and-swap predecessor sets and logs for ignored stale updates                                                      |
+| F-10 | Several financial database errors and recovery persistence errors were unchecked or swallowed             | Execution could stop after partial application with weak diagnostics  | All relevant reads/writes are checked; catches log sanitized type/code and persist retryable/manual state                       |
+| F-11 | RESTEC accepted an empty RPC result as a successful canonical event commit                                | Event could be acknowledged without a proven transaction result       | Empty/incomplete RPC results now fail closed                                                                                    |
+| F-12 | RESTEC reconciliation wrote only the session for remote terminal mismatch/expiry                          | Bill/order/POS projection could remain stale                          | Terminal mismatch is audited and left to the atomic canonical event pipeline                                                    |
+| F-13 | Visiting Safepay's cancel return URL was treated as provider cancellation                                 | A browser navigation could overwrite financial truth                  | Cancel return is audit-only; only verified provider evidence changes payment state                                              |
+| F-14 | Provider `CANCELLED` became session/attempt `failed`/`FAILED`                                             | Cancellation semantics and polling decisions were lost                | Preserve `cancelled` and `CANCELLED` while retaining the compatible outward failure event                                       |
+| F-15 | Linked payment attempts stayed `PREPARED` through later provider states and logs reported the stale value | Database and observability disagreed with the payment/session         | Added truthful attempt mappings for action, processing, terminal, and refund states                                             |
+| F-16 | Frontend polling could overlap, survive unmount, or time out silently                                     | Duplicate requests and post-navigation state updates                  | Abort previous/unmounted polls, handle every terminal status, and surface bounded timeout errors                                |
+| F-17 | RESTEC checkout expiry/cancel paths performed session-only financial mutations                            | Partial projections and races with webhook delivery                   | Removed browser-driven financial mutations; expiry is projected by Paely's atomic expiry/outbox path                            |
+| F-18 | RESTEC POS dispatch and session reconciliation had no deployment scheduler                                | POS delivery and missing-event diagnosis depended on manual calls     | Added Vercel cron and GitHub Actions fallback                                                                                   |
+| F-19 | Certification default pointed at a nonexistent Paely dispatcher path                                      | Certification could time out despite valid code                       | Corrected to `/api/internal/integrations/restec/v1/outbox/dispatch`                                                             |
+| F-20 | `AUTHORIZED` existed in TypeScript but not the PostgreSQL provider enum                                   | Authorized updates could fail at the database boundary                | Migration adds `AUTHORIZED` to `payment_provider_status`                                                                        |
+| F-21 | Dispatcher auth preferred one secret with `A                                                              |                                                                       | B`                                                                                                                              | Vercel `CRON_SECRET` failed whenever a different operator token was also configured | Constant-time validation accepts either configured server-side secret |
+| F-22 | Webhook logs stopped at verification and did not guarantee correlation fields                             | Failures after verification were hard to locate                       | Added structured stage logs with complete nullable correlation context and duration                                             |
+| F-23 | RESTEC job catches and global handler hid the error class                                                 | Operators saw a generic 500 without a safe cause                      | Added sanitized structured error classification and job summaries                                                               |
+| F-24 | New-order checkout called the session store with a database session ID where a session token was required | Session identity could be corrupted after order creation              | Removed the invalid write; `ensureCustomerSession` remains the single token/ID owner                                            |
 
 ## Silent-stop audit
 

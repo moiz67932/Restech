@@ -25,7 +25,7 @@ const topics = [
   ],
   [
     'Sandbox and Production',
-    'Sandbox is https://sandbox-api.restec.io. Production is https://api.restec.io. The scenario route returns 404 in production.',
+    'Restec supplies the environment-specific API hostname during onboarding. Credentials and data never cross environments.',
   ],
   [
     'Create or Update Bill',
@@ -69,7 +69,7 @@ const topics = [
   ],
   [
     'Sandbox Scenarios',
-    'Exercise success, failure, refund, partial, duplicate, delay, ordering, timeout, 429, 500, mismatch, and already-paid behavior through the normal pipeline.',
+    'Coordinate UAT scenarios with Restec; sandbox test controls are not part of the public partner API.',
   ],
   [
     'Certification',
@@ -77,7 +77,7 @@ const topics = [
   ],
   [
     'API Changelog',
-    'Current HTTP version: v1. Current event schema: 2026-07-01. Compatible fields may be added; breaking changes receive a new version and migration window.',
+    'Current HTTP version: v1. Current partner event version: 1.0. Compatible optional fields may be added; breaking changes receive a new version and migration window.',
   ],
   [
     'Support',
@@ -116,7 +116,7 @@ export default function Docs() {
       <section>
         <h2>Signed bill request</h2>
         <pre style={{ overflowX: 'auto', padding: 16, background: '#f3f5f4' }}>
-          <code>{`curl -X PUT https://sandbox-api.restec.io/v1/locations/loc_example/bills/INV-1001 \\\n  -H "Authorization: Bearer rst_test_replace" \\\n  -H "Content-Type: application/json" \\\n  -H "X-Restec-Timestamp: <unix-seconds>" \\\n  -H "X-Restec-Signature: v1=<hmac>" \\\n  -H "X-Request-Id: req_<unique>" \\\n  -H "Idempotency-Key: bill-INV-1001-v1" \\\n  --data-binary @bill.json`}</code>
+          <code>{`curl -X PUT https://sandbox-api.restec.example/v1/locations/loc_example/bills/INV-1001 \\\n  -H "Authorization: Bearer rst_test_replace" \\\n  -H "Content-Type: application/json" \\\n  -H "X-Restec-Timestamp: <unix-seconds>" \\\n  -H "X-Restec-Signature: v1=<hmac>" \\\n  -H "X-Request-Id: req_<unique>" \\\n  -H "Idempotency-Key: bill-INV-1001-v1" \\\n  --data-binary @bill.json`}</code>
         </pre>
       </section>
       {topics.map(([title, text]) => (

@@ -210,7 +210,13 @@ test('customer return polling stops for every terminal payment-session state', a
       await repo.transitionPaymentSession(publicId, terminal, new Date().toISOString());
       const completed = await app.request(`/s/${publicId}/return`);
       const completedHtml = await completed.text();
-      assert.doesNotMatch(completedHtml, /http-equiv="refresh"/);
+      for (const forbiddenTimer of [
+        /http-equiv=["']refresh["']/i,
+        /location\.reload/i,
+        /setInterval/i,
+        /setTimeout/i,
+      ])
+        assert.doesNotMatch(completedHtml, forbiddenTimer);
       assert.match(completedHtml, new RegExp(`Status: ${terminal}`));
     });
   }

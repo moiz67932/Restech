@@ -121,8 +121,10 @@ export function createApp(deps: {
   );
   const api = new Hono();
   api.use('/v1/*', publicAuth(deps.repository, deps.config, deps.rateLimiter));
-  const connection = async (c: any) => {
+  const connection = async (c: any, requiredScope?: string) => {
     const credential = c.get('credential');
+    if (requiredScope && credential.scopes && !credential.scopes.includes(requiredScope))
+      throw new ApiError(403, 'access_denied', 'The credential does not grant this operation.');
     const found = await deps.repository.authorizeLocation(
       c.req.param('locationId'),
       credential.partnerId,
@@ -139,6 +141,8 @@ export function createApp(deps: {
   ) => {
     const key = c.req.header('Idempotency-Key');
     if (!key) throw new ApiError(400, 'invalid_request', 'An idempotency key is required.');
+    if (key.length > 200)
+      throw new ApiError(400, 'invalid_request', 'The idempotency key is invalid.');
     const path = new URL(c.req.url).pathname;
     const begin = await deps.repository.reserveIdempotency(c.get('credential').partnerId, key, {
       requestHash: requestHash(c.req.method, path, c.get('rawBody')),
@@ -175,7 +179,7 @@ export function createApp(deps: {
   };
   api.put('/v1/locations/:locationId/bills/:externalBillId', async (c) =>
     idempotent(c, 'bill_upsert', async (privateKey) => {
-      const con = await connection(c);
+      const con = await connection(c, 'bills:write');
       const body = billSchema.parse(parseRaw(c.get('rawBody')));
       const table = await deps.repository.getTableMapping(con.connectionId, body.external_table_id);
       if (!table || !table.active)
@@ -211,14 +215,14 @@ export function createApp(deps: {
     }),
   );
   api.get('/v1/locations/:locationId/bills/:externalBillId', async (c) => {
-    const con = await connection(c);
+    const con = await connection(c, 'bills:read');
     const value = await deps.repository.getBill(con.connectionId, c.req.param('externalBillId'));
     if (!value) throw new ApiError(404, 'resource_not_found', 'The requested bill was not found.');
     return c.json({ ...value, request_id: c.get('requestId') } as any);
   });
   api.post('/v1/locations/:locationId/bills/:externalBillId/external-payments', async (c) =>
     idempotent(c, 'external_payment', async (privateKey) => {
-      const con = await connection(c);
+      const con = await connection(c, 'payments:write');
       const body = externalPaymentSchema.parse(parseRaw(c.get('rawBody')));
       const hash = requestHash(c.req.method, new URL(c.req.url).pathname, c.get('rawBody'));
       const preflight = await deps.repository.validateExternalPayment(
@@ -240,13 +244,31 @@ export function createApp(deps: {
         restec_bill_id: `bil_${sha256(`${con.connectionId}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
         ...state,
       };
-      return deps.repository.saveExternalPayment(
+      const saved = await deps.repository.saveExternalPayment(
         con.connectionId,
         c.req.param('externalBillId'),
         body,
         result as any,
         hash,
       );
+      await deps.repository.createAuditLog({
+        actorType: 'partner',
+        actorId: con.partnerId,
+        partnerId: con.partnerId,
+        connectionId: con.connectionId,
+        requestId: c.get('requestId'),
+        action: 'external_payment.recorded',
+        result: saved.payment_status,
+        targetType: 'payment',
+        targetId: body.external_payment_id,
+        metadata: {
+          method: body.method,
+          amount_minor: body.amount,
+          currency: body.currency,
+          environment: deploymentEnvironment,
+        },
+      });
+      return saved;
     }),
   );
   api.post('/v1/locations/:locationId/bills/:externalBillId/payment-sessions', async (c) => {
@@ -264,7 +286,7 @@ export function createApp(deps: {
             'Cardholder data must be entered only on the secure hosted payment page.',
           );
         const body = paymentSessionRequestSchema.parse(rawInput);
-        const con = await connection(c);
+        const con = await connection(c, 'payment_sessions:write');
         const externalBillId = c.req.param('externalBillId');
         const bill = await deps.repository.getBill(con.connectionId, externalBillId);
         if (!bill)
@@ -402,7 +424,7 @@ export function createApp(deps: {
   api.get('/v1/locations/:locationId/payment-sessions/:paymentSessionId', async (c) => {
     paymentSessionsAvailable();
     requirePublicEnvironment(c);
-    const con = await connection(c);
+    const con = await connection(c, 'payment_sessions:read');
     const publicId = c.req.param('paymentSessionId');
     if (!/^rps_(?:test|live)_[A-Za-z0-9]+$/.test(publicId))
       throw new ApiError(
@@ -425,7 +447,7 @@ export function createApp(deps: {
     return c.json(paymentSessionResponse(session));
   });
   api.get('/v1/locations/:locationId/tables', async (c) => {
-    const con = await connection(c);
+    const con = await connection(c, 'tables:read');
     return c.json({
       request_id: c.get('requestId'),
       data: await deps.repository.listTables(con.connectionId),
@@ -1044,8 +1066,7 @@ export function createApp(deps: {
         payment_id: incoming.data.payment.payment_id,
         private_payment_session_id:
           incoming.data.payment_session?.private_payment_session_id ?? null,
-        provider_session_id:
-          incoming.data.payment_session?.private_payment_session_id ?? null,
+        provider_session_id: incoming.data.payment_session?.private_payment_session_id ?? null,
         provider_status: incoming.data.payment.status,
         canonical_status: committedStatus,
         session_status: committedStatus,
@@ -1080,10 +1101,10 @@ export function createApp(deps: {
           event.connectorEnabled,
         );
         const context = {
-          partnerId: 'system',
+          partnerId: event.partnerId,
           connectionId: event.connectionId,
           locationId: event.payload.data.location_id,
-          environment: deps.config.RESTEC_ENV,
+          environment: event.environment,
           configuration: event.configuration,
         } as const;
         phase = 'serialization';
@@ -1232,6 +1253,62 @@ export function createApp(deps: {
       202,
     );
   });
+  const problem = (
+    c: any,
+    status: number,
+    code: string,
+    detail: string,
+    details: Record<string, unknown> = {},
+    fieldErrors?: Array<{ field: string; message: string }>,
+  ) => {
+    const requestId = c.get('requestId') ?? `req_${randomUUID().replaceAll('-', '')}`;
+    const titles: Record<number, string> = {
+      400: 'Invalid request',
+      401: 'Authentication failed',
+      403: 'Access denied',
+      404: 'Resource not found',
+      409: 'Conflict',
+      410: 'Resource expired',
+      413: 'Payload too large',
+      422: 'Validation failed',
+      429: 'Rate limit exceeded',
+      500: 'Internal error',
+      502: 'Dependency failure',
+      503: 'Service unavailable',
+      504: 'Dependency timeout',
+    };
+    const retryable =
+      typeof details.retryable === 'boolean'
+        ? details.retryable
+        : status === 429 || status === 502 || status === 503 || status === 504;
+    const retryAfter =
+      typeof details.retry_after_seconds === 'number' ? details.retry_after_seconds : undefined;
+    const legacyDetails = {
+      ...details,
+      ...(fieldErrors
+        ? { issues: fieldErrors.map((value) => ({ path: value.field, message: value.message })) }
+        : {}),
+    };
+    const response = c.json(
+      {
+        type: `urn:restec:error:${code}`,
+        title: titles[status] ?? 'Request failed',
+        status,
+        detail,
+        instance: new URL(c.req.url).pathname,
+        code,
+        request_id: requestId,
+        ...(fieldErrors ? { field_errors: fieldErrors } : {}),
+        retryable,
+        ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
+        error: { code, message: detail, request_id: requestId, details: legacyDetails },
+      },
+      status as any,
+    );
+    response.headers.set('Content-Type', 'application/problem+json');
+    response.headers.set('X-Request-Id', requestId);
+    return response;
+  };
   app.onError((error, c) => {
     const requestId = c.get('requestId') ?? `req_${randomUUID().replaceAll('-', '')}`;
     if (!(error instanceof PrivateDependencyError))
@@ -1250,32 +1327,24 @@ export function createApp(deps: {
                 : 'internal_error',
         }),
       );
-    if (error instanceof ZodError)
-      return c.json(
-        {
-          error: {
-            code: 'invalid_request',
-            message: 'The request is invalid.',
-            request_id: requestId,
-            details: {
-              issues: error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-            },
-          },
-        },
-        400,
+    if (error instanceof ZodError) {
+      const status = new URL(c.req.url).pathname.startsWith('/v1/') ? 422 : 400;
+      return problem(
+        c,
+        status,
+        'invalid_request',
+        'The request is invalid.',
+        {},
+        error.issues.map((issue) => ({
+          field: issue.path.join('.') || 'body',
+          message: issue.message,
+        })),
       );
+    }
+    if (error instanceof SyntaxError)
+      return problem(c, 400, 'invalid_request', 'The request body is not valid JSON.');
     if (error instanceof ApiError)
-      return c.json(
-        {
-          error: {
-            code: error.code,
-            message: error.message,
-            request_id: requestId,
-            details: error.details,
-          },
-        },
-        error.status as any,
-      );
+      return problem(c, error.status, error.code, error.message, error.details);
     if (error instanceof RepositoryError) {
       const associationRejections = new Set([
         'paely_connection_mapping_not_found',
@@ -1305,8 +1374,8 @@ export function createApp(deps: {
         amount_mismatch: 'The amount or currency does not match the bill.',
         invalid_status_transition: 'The requested payment state transition is not allowed.',
         paely_connection_mapping_not_found:
-          'The Paely connection reference has no active Restec mapping.',
-        paely_location_mapping_not_found: 'The Paely location reference has no Restec mapping.',
+          'The connection reference has no active Restec mapping.',
+        paely_location_mapping_not_found: 'The location reference has no Restec mapping.',
         connection_reference_mismatch: 'The event connection does not match the payment session.',
         location_reference_mismatch: 'The event location does not match the payment session.',
         payment_session_reference_mismatch: 'The private payment session reference does not match.',
@@ -1315,17 +1384,7 @@ export function createApp(deps: {
         payment_method_mismatch: 'The payment method does not match the payment session.',
         payment_status_mismatch: 'The payment session status does not match the event type.',
       };
-      return c.json(
-        {
-          error: {
-            code: error.code,
-            message: messages[error.code],
-            request_id: requestId,
-            details: {},
-          },
-        },
-        status as any,
-      );
+      return problem(c, status, error.code, messages[error.code] ?? 'The request conflicts.');
     }
     if (error instanceof PrivateDependencyError) {
       const status =
@@ -1354,29 +1413,15 @@ export function createApp(deps: {
           required_response_fields_present: error.responseDiagnostics?.requiredFieldsPresent,
         }),
       );
-      return c.json(
-        {
-          error: {
-            code: 'dependency_unavailable',
-            message: 'The requested operation could not be completed at this time.',
-            request_id: requestId,
-            details: { retryable: error.retryable },
-          },
-        },
+      return problem(
+        c,
         status,
+        'dependency_unavailable',
+        'The requested operation could not be completed at this time.',
+        { retryable: error.retryable },
       );
     }
-    return c.json(
-      {
-        error: {
-          code: 'internal_error',
-          message: 'An internal error occurred.',
-          request_id: requestId,
-          details: {},
-        },
-      },
-      500,
-    );
+    return problem(c, 500, 'internal_error', 'An internal error occurred.');
   });
   return app;
 }

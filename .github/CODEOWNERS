@@ -1,0 +1,15 @@
+# Financial and public-contract changes require an explicit owner review.
+/apps/api/src/app.ts @moiz67932
+/apps/api/src/payment-sessions.ts @moiz67932
+/apps/api/src/payment-sessions.test.ts @moiz67932
+/packages/contracts/src/ @moiz67932
+/packages/database/src/ @moiz67932
+/packages/connectors/canonical-rest/src/ @moiz67932
+/packages/webhook-delivery/src/ @moiz67932
+/supabase/migrations/ @moiz67932
+/openapi/ @moiz67932
+/docs/pos-partner/ @moiz67932
+/postman/ @moiz67932
+/examples/ @moiz67932
+/.github/workflows/ @moiz67932
+/.github/CODEOWNERS @moiz67932

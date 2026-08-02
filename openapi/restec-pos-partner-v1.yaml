@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: Restec POS API
-  version: 2026-07-01
+  title: Restec POS Partner API
+  version: 1.0.0
   description: |
     Public interface for restaurant POS bill synchronization, external payment reporting,
     hosted payment sessions, reconciliation, and signed payment-status webhooks. Money uses integer minor units.
@@ -10,17 +10,16 @@ info:
     secure hosted payment page. A checkout redirect is never proof of payment; completion is
     asynchronous and authoritative only through a verified Restec webhook or status response.
 servers:
-  - url: https://sandbox-api.restec.io
-    description: Sandbox
-  - url: https://api.restec.io
-    description: Production
+  - url: https://sandbox-api.restec.example
+    description: Placeholder; replace with the activated Restec sandbox hostname supplied during onboarding.
+  - url: https://api.restec.example
+    description: Placeholder; replace with the activated Restec production hostname supplied during go-live.
 security: [{ bearerAuth: [], requestSignature: [] }]
 tags:
   - { name: Bills, description: Create, update, and reconcile bills. }
   - { name: Payments, description: Report completed external payment facts. }
   - { name: Payment Sessions, description: Start and query secure hosted payment sessions. }
   - { name: Tables, description: Retrieve authorized table mappings. }
-  - { name: Sandbox, description: Exercise the real event delivery pipeline in sandbox only. }
 paths:
   /health:
     get:
@@ -34,7 +33,7 @@ paths:
               content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } },
             },
         }
-  /v1/locations/{locationId}/bills/{externalBillId}:
+  /v1/locations/{location_id}/bills/{external_bill_id}:
     parameters:
       [
         { $ref: '#/components/parameters/LocationId' },
@@ -42,6 +41,7 @@ paths:
         { $ref: '#/components/parameters/Timestamp' },
         { $ref: '#/components/parameters/Signature' },
         { $ref: '#/components/parameters/RequestId' },
+        { $ref: '#/components/parameters/ContentType' },
       ]
     put:
       tags: [Bills]
@@ -57,9 +57,16 @@ paths:
           '200': { $ref: '#/components/responses/Bill' },
           '400': { $ref: '#/components/responses/Error' },
           '401': { $ref: '#/components/responses/Error' },
+          '403': { $ref: '#/components/responses/Error' },
+          '404': { $ref: '#/components/responses/Error' },
+          '413': { $ref: '#/components/responses/Error' },
           '409': { $ref: '#/components/responses/Error' },
           '422': { $ref: '#/components/responses/Error' },
           '429': { $ref: '#/components/responses/Error' },
+          '500': { $ref: '#/components/responses/Error' },
+          '502': { $ref: '#/components/responses/Error' },
+          '503': { $ref: '#/components/responses/Error' },
+          '504': { $ref: '#/components/responses/Error' },
         }
     get:
       tags: [Bills]
@@ -67,10 +74,17 @@ paths:
       responses:
         {
           '200': { $ref: '#/components/responses/Bill' },
+          '400': { $ref: '#/components/responses/Error' },
           '401': { $ref: '#/components/responses/Error' },
+          '403': { $ref: '#/components/responses/Error' },
           '404': { $ref: '#/components/responses/Error' },
+          '409': { $ref: '#/components/responses/Error' },
+          '413': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+          '500': { $ref: '#/components/responses/Error' },
+          '503': { $ref: '#/components/responses/Error' },
         }
-  /v1/locations/{locationId}/bills/{externalBillId}/external-payments:
+  /v1/locations/{location_id}/bills/{external_bill_id}/external-payments:
     parameters:
       [
         { $ref: '#/components/parameters/LocationId' },
@@ -78,6 +92,7 @@ paths:
         { $ref: '#/components/parameters/Timestamp' },
         { $ref: '#/components/parameters/Signature' },
         { $ref: '#/components/parameters/RequestId' },
+        { $ref: '#/components/parameters/ContentType' },
         { $ref: '#/components/parameters/IdempotencyKey' },
       ]
     post:
@@ -93,16 +108,26 @@ paths:
         {
           '200': { $ref: '#/components/responses/Bill' },
           '400': { $ref: '#/components/responses/Error' },
+          '401': { $ref: '#/components/responses/Error' },
+          '403': { $ref: '#/components/responses/Error' },
+          '404': { $ref: '#/components/responses/Error' },
           '409': { $ref: '#/components/responses/Error' },
+          '413': { $ref: '#/components/responses/Error' },
           '422': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+          '500': { $ref: '#/components/responses/Error' },
+          '502': { $ref: '#/components/responses/Error' },
+          '503': { $ref: '#/components/responses/Error' },
+          '504': { $ref: '#/components/responses/Error' },
         }
-  /v1/locations/{locationId}/bills/{externalBillId}/payment-sessions:
+  /v1/locations/{location_id}/bills/{external_bill_id}/payment-sessions:
     parameters:
       - { $ref: '#/components/parameters/LocationId' }
       - { $ref: '#/components/parameters/ExternalBillId' }
       - { $ref: '#/components/parameters/Timestamp' }
       - { $ref: '#/components/parameters/Signature' }
       - { $ref: '#/components/parameters/RequestId' }
+      - { $ref: '#/components/parameters/ContentType' }
       - { $ref: '#/components/parameters/Environment' }
       - { $ref: '#/components/parameters/IdempotencyKey' }
     post:
@@ -125,17 +150,24 @@ paths:
               schema: { $ref: '#/components/schemas/PaymentSessionCreated' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
-  /v1/locations/{locationId}/payment-sessions/{paymentSessionId}:
+        '504': { $ref: '#/components/responses/Error' }
+  /v1/locations/{location_id}/payment-sessions/{payment_session_id}:
     parameters:
       - { $ref: '#/components/parameters/LocationId' }
       - { $ref: '#/components/parameters/PaymentSessionId' }
       - { $ref: '#/components/parameters/Timestamp' }
       - { $ref: '#/components/parameters/Signature' }
       - { $ref: '#/components/parameters/RequestId' }
+      - { $ref: '#/components/parameters/ContentType' }
       - { $ref: '#/components/parameters/Environment' }
     get:
       tags: [Payment Sessions]
@@ -147,15 +179,23 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PaymentSessionStatus' }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /v1/locations/{locationId}/tables:
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/locations/{location_id}/tables:
     parameters:
       [
         { $ref: '#/components/parameters/LocationId' },
         { $ref: '#/components/parameters/Timestamp' },
         { $ref: '#/components/parameters/Signature' },
         { $ref: '#/components/parameters/RequestId' },
+        { $ref: '#/components/parameters/ContentType' },
       ]
     get:
       tags: [Tables]
@@ -198,90 +238,46 @@ paths:
                 },
             },
           '401': { $ref: '#/components/responses/Error' },
-        }
-  /v1/test/scenarios:
-    post:
-      tags: [Sandbox]
-      operationId: createSandboxScenario
-      parameters:
-        [
-          { $ref: '#/components/parameters/Timestamp' },
-          { $ref: '#/components/parameters/Signature' },
-          { $ref: '#/components/parameters/RequestId' },
-          { $ref: '#/components/parameters/IdempotencyKey' },
-        ]
-      requestBody:
-        {
-          required: true,
-          content:
-            {
-              application/json:
-                {
-                  schema:
-                    {
-                      type: object,
-                      additionalProperties: false,
-                      required: [external_bill_id, scenario],
-                      properties:
-                        {
-                          location_id: { type: string, pattern: '^loc_' },
-                          external_bill_id: { type: string, minLength: 1, maxLength: 128 },
-                          amount: { type: integer, minimum: 1 },
-                          scenario:
-                            {
-                              type: string,
-                              enum:
-                                [
-                                  payment.completed,
-                                  payment.failed,
-                                  payment.refunded,
-                                  partial_payment.completed,
-                                  duplicate_event,
-                                  delayed_event,
-                                  out_of_order_event,
-                                  webhook_timeout,
-                                  webhook_429,
-                                  webhook_500,
-                                  amount_mismatch,
-                                  bill_already_paid,
-                                ],
-                            },
-                        },
-                    },
-                },
-            },
-        }
-      responses:
-        {
-          '202': { description: Scenario accepted or replayed },
-          '404': { description: Not available in production },
+          '400': { $ref: '#/components/responses/Error' },
+          '403': { $ref: '#/components/responses/Error' },
+          '409': { $ref: '#/components/responses/Error' },
+          '413': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+          '500': { $ref: '#/components/responses/Error' },
+          '503': { $ref: '#/components/responses/Error' },
         }
 components:
   securitySchemes:
-    bearerAuth: { type: http, scheme: bearer, bearerFormat: rst_test_or_live_key }
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Restec partner credential
+      description: Environment-specific credential issued once by Restec.
     requestSignature:
       {
         type: apiKey,
         in: header,
         name: X-Restec-Signature,
-        description: HMAC-SHA256 over timestamp,
-        method,
-        path,
-        and exact raw body bytes.,
+        description: HMAC-SHA256 `v1=<lowercase hex>` over `timestamp.METHOD.path.exact_raw_body`.,
       }
   parameters:
     LocationId:
-      { name: locationId, in: path, required: true, schema: { type: string, pattern: '^loc_' } }
+      {
+        name: location_id,
+        in: path,
+        required: true,
+        schema: { type: string, pattern: '^loc_[A-Za-z0-9_]+$' },
+      }
     ExternalBillId:
       {
-        name: externalBillId,
+        name: external_bill_id,
         in: path,
         required: true,
         schema: { type: string, minLength: 1, maxLength: 128 },
       }
     PaymentSessionId:
       {
-        name: paymentSessionId,
+        name: payment_session_id,
         in: path,
         required: true,
         schema: { type: string, pattern: '^rps_(test|live)_[A-Za-z0-9]+$' },
@@ -308,13 +304,24 @@ components:
         schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' },
       }
     RequestId:
-      { name: X-Request-Id, in: header, required: true, schema: { type: string, pattern: '^req_' } }
+      name: X-Request-Id
+      in: header
+      required: true
+      schema: { type: string, pattern: '^req_[A-Za-z0-9._:-]{4,123}$' }
+      description: Unique for every HTTP attempt; never reuse it on a retry.
+    ContentType:
+      name: Content-Type
+      in: header
+      required: true
+      schema: { type: string, const: application/json }
+      description: Required on signed requests, including signed GET requests.
     IdempotencyKey:
       {
         name: Idempotency-Key,
         in: header,
         required: true,
-        schema: { type: string, minLength: 8, maxLength: 255 },
+        schema: { type: string, minLength: 1, maxLength: 200 },
+        description: Stable for every retry of the same logical mutation and body.,
       }
   schemas:
     Amount: { type: integer, minimum: 0, maximum: 2147483647 }
@@ -325,12 +332,12 @@ components:
         required: [external_item_id, name, quantity, unit_amount, total_amount],
         properties:
           {
-            external_item_id: { type: string },
-            name: { type: string },
-            quantity: { type: integer, minimum: 1 },
+            external_item_id: { type: string, minLength: 1, maxLength: 128 },
+            name: { type: string, minLength: 1, maxLength: 200 },
+            quantity: { type: integer, minimum: 1, maximum: 10000 },
             unit_amount: { $ref: '#/components/schemas/Amount' },
             total_amount: { $ref: '#/components/schemas/Amount' },
-            notes: { type: string },
+            notes: { type: string, maxLength: 500 },
           },
       }
     Totals:
@@ -355,8 +362,8 @@ components:
         required: [external_table_id, version, currency, status, items, totals, occurred_at],
         properties:
           {
-            external_table_id: { type: string },
-            external_order_id: { type: string },
+            external_table_id: { type: string, minLength: 1, maxLength: 128 },
+            external_order_id: { type: string, minLength: 1, maxLength: 128 },
             version: { type: integer, minimum: 1 },
             currency: { type: string, pattern: '^[A-Z]{3}$' },
             status: { type: string, enum: [open, completed, cancelled] },
@@ -374,7 +381,12 @@ components:
               },
             totals: { $ref: '#/components/schemas/Totals' },
             occurred_at: { type: string, format: date-time },
-            metadata: { type: object, maxProperties: 100 },
+            metadata:
+              {
+                type: object,
+                additionalProperties: true,
+                description: Maximum serialized size is 8 KB.,
+              },
           },
       }
     ExternalPayment:
@@ -384,14 +396,19 @@ components:
         required: [external_payment_id, method, amount, currency, status, occurred_at],
         properties:
           {
-            external_payment_id: { type: string },
+            external_payment_id: { type: string, minLength: 1, maxLength: 128 },
             method: { type: string, enum: [cash, card_terminal, wallet_terminal, voucher, other] },
-            amount: { $ref: '#/components/schemas/Amount' },
-            currency: { type: string },
+            amount: { type: integer, minimum: 1, maximum: 2147483647 },
+            currency: { type: string, pattern: '^[A-Z]{3}$' },
             status: { const: completed },
             occurred_at: { type: string, format: date-time },
-            processor_reference: { type: string },
-            metadata: { type: object },
+            processor_reference: { type: string, maxLength: 200 },
+            metadata:
+              {
+                type: object,
+                additionalProperties: true,
+                description: Maximum serialized size is 8 KB.,
+              },
           },
       }
     PaymentSessionInput:
@@ -407,12 +424,17 @@ components:
           additionalProperties: false
           properties:
             email: { type: string, format: email, maxLength: 254 }
-            mobile: { type: string, minLength: 8, maxLength: 20 }
+            mobile: { type: string, pattern: '^\\+?[0-9][0-9 -]{6,18}[0-9]$' }
         return_context:
           type: object
           additionalProperties: false
           properties:
-            pos_reference: { type: string, maxLength: 128 }
+            pos_reference: { type: string, minLength: 1, maxLength: 128 }
+      example:
+        amount_minor: 10000
+        currency: PKR
+        method: card
+        return_context: { pos_reference: POS-ORDER-1001 }
     PaymentSessionState:
       type: string
       enum:
@@ -494,12 +516,19 @@ components:
             request_id,
             restec_bill_id,
             external_bill_id,
+            external_table_id,
+            sync_status,
+            order_status,
             payment_status,
+            table_session_status,
+            currency,
             grand_total,
             amount_paid,
             amount_refunded,
             amount_due,
             version,
+            reconciliation_status,
+            updated_at,
           ],
         properties:
           {
@@ -508,18 +537,128 @@ components:
             external_bill_id: { type: string },
             external_table_id: { type: string },
             sync_status: { const: accepted },
-            order_status: { type: string },
-            payment_status: { type: string },
-            table_session_status: { type: string },
-            currency: { type: string },
+            order_status:
+              {
+                type: string,
+                enum: [open, accepted, preparing, ready, served, completed, cancelled],
+              },
+            payment_status:
+              {
+                type: string,
+                enum:
+                  [
+                    unpaid,
+                    payment_in_progress,
+                    partially_paid,
+                    paid,
+                    partially_refunded,
+                    refunded,
+                    failed,
+                  ],
+              },
+            table_session_status:
+              { type: string, enum: [open, ordering, dining, payment_due, closing, closed] },
+            currency: { type: string, pattern: '^[A-Z]{3}$' },
             grand_total: { $ref: '#/components/schemas/Amount' },
             amount_paid: { $ref: '#/components/schemas/Amount' },
             amount_refunded: { $ref: '#/components/schemas/Amount' },
             amount_due: { $ref: '#/components/schemas/Amount' },
-            version: { type: integer },
+            version: { type: integer, minimum: 1 },
+            reconciliation_status: { type: string, enum: [matched, mismatch, review_required] },
             updated_at: { type: string, format: date-time },
           },
       }
+    PartnerWebhookEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - event_id
+        - event_type
+        - event_version
+        - occurred_at
+        - environment
+        - partner_id
+        - location_id
+        - external_bill_id
+        - payment_reference
+        - amount_minor
+        - currency
+        - payment_method
+        - payment_status
+        - bill
+        - metadata
+      properties:
+        event_id: { type: string, pattern: '^evt_[A-Za-z0-9_]+$' }
+        event_type:
+          type: string
+          enum:
+            - payment.completed
+            - payment.failed
+            - payment.expired
+            - payment.refunded
+            - payment.partially_refunded
+        event_version: { const: '1.0' }
+        occurred_at: { type: string, format: date-time }
+        environment: { type: string, enum: [sandbox, production] }
+        partner_id: { type: string, pattern: '^ptr_[A-Za-z0-9_]+$' }
+        location_id: { type: string, pattern: '^loc_[A-Za-z0-9_]+$' }
+        external_bill_id: { type: string, minLength: 1, maxLength: 128 }
+        payment_session_id: { type: string, pattern: '^rps_(test|live)_[A-Za-z0-9]+$' }
+        payment_reference: { type: string, pattern: '^pay_[A-Za-z0-9_]+$' }
+        amount_minor: { $ref: '#/components/schemas/Amount' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        payment_method:
+          type: string
+          enum: [card, wallet, cash, card_terminal, wallet_terminal, voucher, other]
+        payment_status: { type: string, enum: [completed, failed, refunded] }
+        bill:
+          type: object
+          additionalProperties: false
+          required: [grand_total, amount_paid, amount_refunded, amount_due, payment_status, version]
+          properties:
+            grand_total: { $ref: '#/components/schemas/Amount' }
+            amount_paid: { $ref: '#/components/schemas/Amount' }
+            amount_refunded: { $ref: '#/components/schemas/Amount' }
+            amount_due: { $ref: '#/components/schemas/Amount' }
+            payment_status:
+              {
+                type: string,
+                enum:
+                  [
+                    unpaid,
+                    payment_in_progress,
+                    partially_paid,
+                    paid,
+                    partially_refunded,
+                    refunded,
+                    failed,
+                  ],
+              }
+            version: { type: integer, minimum: 1 }
+        metadata: { type: object, additionalProperties: true }
+      example:
+        event_id: evt_example1001
+        event_type: payment.completed
+        event_version: '1.0'
+        occurred_at: '2026-08-02T10:06:00Z'
+        environment: sandbox
+        partner_id: ptr_example
+        location_id: loc_example
+        external_bill_id: BILL-1001
+        payment_session_id: rps_test_example1001
+        payment_reference: pay_example1001
+        amount_minor: 10000
+        currency: PKR
+        payment_method: card
+        payment_status: completed
+        bill:
+          grand_total: 10000
+          amount_paid: 10000
+          amount_refunded: 0
+          amount_due: 0
+          payment_status: paid
+          version: 2
+        metadata: {}
     Health:
       {
         type: object,
@@ -533,25 +672,64 @@ components:
           },
       }
     Error:
-      {
-        type: object,
-        required: [error],
-        properties:
-          {
-            error:
-              {
-                type: object,
-                required: [code, message, request_id, details],
-                properties:
-                  {
-                    code: { type: string },
-                    message: { type: string },
-                    request_id: { type: string },
-                    details: { type: object },
-                  },
-              },
-          },
-      }
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, instance, code, request_id, retryable, error]
+      properties:
+        type: { type: string, pattern: '^urn:restec:error:' }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_credentials
+            - access_denied
+            - resource_not_found
+            - replay_detected
+            - idempotency_conflict
+            - bill_version_conflict
+            - payment_in_progress
+            - bill_already_paid
+            - payload_too_large
+            - amount_mismatch
+            - invalid_status_transition
+            - bill_not_payable
+            - amount_exceeds_balance
+            - currency_not_supported
+            - payment_method_not_available
+            - payment_session_expired
+            - payment_session_not_found
+            - payment_session_already_completed
+            - payment_confirmation_pending
+            - invalid_checkout_destination
+            - rate_limited
+            - internal_error
+            - dependency_unavailable
+        request_id: { type: string, pattern: '^req_' }
+        field_errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+        retryable: { type: boolean }
+        retry_after_seconds: { type: integer, minimum: 0 }
+        error:
+          type: object
+          deprecated: true
+          description: Compatibility projection; new integrations use the top-level problem fields.
+          required: [code, message, request_id, details]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+            details: { type: object, additionalProperties: true }
 
   responses:
     Bill:
@@ -562,7 +740,16 @@ components:
     Error:
       {
         description: Stable Restec error,
-        content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } },
+        headers:
+          {
+            X-Request-Id: { schema: { type: string } },
+            Retry-After:
+              {
+                schema: { type: integer },
+                description: Present when the caller must delay a retry.,
+              },
+          },
+        content: { application/problem+json: { schema: { $ref: '#/components/schemas/Error' } } },
       }
 
 webhooks:
@@ -573,8 +760,11 @@ webhooks:
         Verify `X-Restec-Signature` over `timestamp.exact_raw_body`, durably store the
         event ID with a unique constraint, and acknowledge with 200, 201, 202, or 204.
         Close the invoice only when `payment_status` is `paid` and `amount_due` is zero.
+        The canonical signing input is the ASCII timestamp, a period, and the exact request-body
+        bytes: `timestamp.exact_raw_body`. Compute HMAC-SHA256 with the environment-specific
+        webhook signing secret and compare `v1=<lowercase hex>` in constant time.
         Temporary failures are retried after 30 seconds, 2 minutes, 10 minutes, 30 minutes,
-        2 hours, 6 hours, and 12 hours. The public event ID stays unchanged.
+        2 hours, 6 hours, and 12 hours. The event ID and body stay unchanged.
       parameters:
         - {
             name: X-Restec-Event-Id,
@@ -606,24 +796,9 @@ webhooks:
         content:
           application/json:
             schema:
-              type: object
-              required: [id, type, schema_version, created_at, data]
-              properties:
-                id: { type: string, pattern: '^evt_' }
-                type:
-                  {
-                    type: string,
-                    enum:
-                      [
-                        payment.completed,
-                        payment.failed,
-                        payment.expired,
-                        payment.refunded,
-                        payment.partially_refunded,
-                      ],
-                  }
-                schema_version: { const: '2026-07-01' }
-                created_at: { type: string, format: date-time }
-                data: { type: object }
+              $ref: '#/components/schemas/PartnerWebhookEvent'
       responses:
+        '200': { description: Durably accepted }
+        '201': { description: Durably accepted }
         '202': { description: Durably accepted }
+        '204': { description: Durably accepted without a response body }

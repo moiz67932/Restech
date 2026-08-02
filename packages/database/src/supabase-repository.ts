@@ -105,7 +105,7 @@ export class SupabaseRepository implements RestecRepository {
     const { data, error } = await this.db
       .from('api_keys')
       .select(
-        'partner_id,environment,key_prefix,key_hash,status,expires_at,encrypted_signing_secret',
+        'partner_id,environment,key_prefix,key_hash,status,expires_at,encrypted_signing_secret,scopes,location_scopes,credential_version,grace_ends_at',
       )
       .eq('key_prefix', prefix)
       .eq('environment', environment)
@@ -115,6 +115,8 @@ export class SupabaseRepository implements RestecRepository {
     if (
       !data ||
       (data.expires_at && new Date(data.expires_at) <= new Date()) ||
+      (data.status === 'overlap' &&
+        (!data.grace_ends_at || new Date(data.grace_ends_at) <= new Date())) ||
       !secureEqual(hashApiKey(apiKey, this.config.apiKeyHashSecret), data.key_hash) ||
       !data.encrypted_signing_secret
     )
@@ -125,6 +127,10 @@ export class SupabaseRepository implements RestecRepository {
       signingSecret: decryptSecret(data.encrypted_signing_secret, this.config.secretEncryptionKey),
       status: data.status,
       keyPrefix: data.key_prefix,
+      scopes: Array.isArray(data.scopes) ? data.scopes : [],
+      locationScopes: Array.isArray(data.location_scopes) ? data.location_scopes : [],
+      credentialVersion: Number(data.credential_version),
+      ...(data.grace_ends_at ? { graceEndsAt: new Date(data.grace_ends_at) } : {}),
     };
     return data.expires_at
       ? { ...authenticated, expiresAt: new Date(data.expires_at) }
@@ -493,6 +499,8 @@ export class SupabaseRepository implements RestecRepository {
           id: row.id,
           publicEventId: row.public_event_id,
           connectionId: row.connection_id,
+          partnerId: connection.partnerId,
+          environment: connection.environment,
           eventType: row.event_type,
           schemaVersion: row.schema_version,
           payload: row.payload,

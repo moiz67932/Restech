@@ -209,6 +209,8 @@ export class MemoryRepository implements RestecRepository {
       id: randomUUID(),
       publicEventId: input.publicEventId,
       connectionId: connection?.connectionId ?? input.connectionId,
+      partnerId: connection?.partnerId ?? 'ptr_system',
+      environment: connection?.environment ?? 'sandbox',
       eventType: input.eventType,
       schemaVersion: input.schemaVersion,
       payload: input.publicPayload,

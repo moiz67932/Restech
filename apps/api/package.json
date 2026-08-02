@@ -11,7 +11,7 @@
     "build": "tsc -b --force tsconfig.json && node ../../scripts/verify-vercel-runtime.mjs"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
+    "@hono/node-server": "^2.0.12",
     "@restec/connector-registry": "0.1.0",
     "@restec/contracts": "0.1.0",
     "@restec/database": "0.1.0",

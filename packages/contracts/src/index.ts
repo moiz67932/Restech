@@ -193,9 +193,53 @@ export const eventSchema = z
         message: 'Paid bills must have no amount due',
       });
   });
+export const partnerWebhookEventSchema = z
+  .object({
+    event_id: publicIds.event,
+    event_type: z.enum([
+      'payment.completed',
+      'payment.failed',
+      'payment.expired',
+      'payment.refunded',
+      'payment.partially_refunded',
+    ]),
+    event_version: z.literal('1.0'),
+    occurred_at: z.string().datetime(),
+    environment: z.enum(['sandbox', 'production']),
+    partner_id: publicIds.partner,
+    location_id: publicIds.location,
+    external_bill_id: z.string().min(1).max(128),
+    payment_session_id: publicIds.paymentSession.optional(),
+    payment_reference: publicIds.payment,
+    amount_minor: minorAmount,
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    payment_method: z.enum([
+      'card',
+      'wallet',
+      'cash',
+      'card_terminal',
+      'wallet_terminal',
+      'voucher',
+      'other',
+    ]),
+    payment_status: z.enum(['completed', 'failed', 'refunded']),
+    bill: z
+      .object({
+        grand_total: minorAmount,
+        amount_paid: minorAmount,
+        amount_refunded: minorAmount,
+        amount_due: minorAmount,
+        payment_status: paymentStatusSchema,
+        version: z.number().int().positive(),
+      })
+      .strict(),
+    metadata: z.record(z.unknown()),
+  })
+  .strict();
 export type CanonicalBillInput = z.infer<typeof billSchema>;
 export type CanonicalExternalPaymentInput = z.infer<typeof externalPaymentSchema>;
 export type CanonicalRestecEvent = z.infer<typeof eventSchema>;
+export type PartnerWebhookEvent = z.infer<typeof partnerWebhookEventSchema>;
 export type PaymentSessionRequest = z.infer<typeof paymentSessionRequestSchema>;
 export type PaymentSessionStatus = z.infer<typeof paymentSessionStatusSchema>;
 export type PublicPaymentSessionStatus = z.infer<typeof publicPaymentSessionStatusSchema>;

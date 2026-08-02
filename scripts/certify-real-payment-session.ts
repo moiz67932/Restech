@@ -464,10 +464,14 @@ export async function monitorCertification(input: CertificationMonitorInput) {
   let progressSettled = false;
   const pendingReports = new Map<CertificationStage, Record<string, unknown> | undefined>();
 
-  const flushReports = () => {
+  const flushReports = (allowGaps = false) => {
+    if (!emitted.has('checkout_returned')) return;
     for (const pendingStage of certificationStages) {
       if (reported.has(pendingStage)) continue;
-      if (!emitted.has(pendingStage)) continue;
+      if (!emitted.has(pendingStage)) {
+        if (allowGaps) continue;
+        break;
+      }
       reportStage(pendingStage, pendingReports.get(pendingStage));
       reported.add(pendingStage);
       pendingReports.delete(pendingStage);
@@ -477,7 +481,7 @@ export async function monitorCertification(input: CertificationMonitorInput) {
     if (emitted.has(stage)) return;
     emitted.add(stage);
     pendingReports.set(stage, details);
-    flushReports();
+    flushReports(stage === 'certification_passed');
   };
   const markProgress = () => {
     if (progressSettled) return;
@@ -503,6 +507,7 @@ export async function monitorCertification(input: CertificationMonitorInput) {
           paely_evidence: sanitizedPollingValue(paely),
           restec_evidence: sanitizedPollingValue(restec),
         };
+        reportPoll(pollDiagnostic);
         if (hasProgressed(input.initialStatus, status, paely)) markProgress();
 
         if (safepayWebhookVerified(paely)) emit('safepay_webhook_verified');
@@ -544,7 +549,6 @@ export async function monitorCertification(input: CertificationMonitorInput) {
           markProgress();
           return { status, paely, restec };
         }
-        reportPoll(pollDiagnostic);
         if (['failed', 'expired', 'refunded'].includes(status.status))
           throw new CertificationStateError(`restec_terminal_${status.status}`);
         if (now() >= deadline) break;

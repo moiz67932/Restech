@@ -216,7 +216,7 @@ including signed GETs with an empty body.
 | `GET /v1/locations/:locationId/tables`                                   | List mapped Restec/external tables                   | Returns active and inactive mappings; bill upsert separately rejects inactive mapping                                          | `createApp`; repository `listTables`                                      |
 | `POST /v1/test/scenarios`                                                | Generate sandbox event/failure scenarios             | Idempotency required; unavailable after valid auth in production; uses normal projection/outbox path                           | `createApp`; repository `createSandboxEvent`                              |
 
-The public OpenAPI file is `docs/openapi/restec-pos-public-api.yaml`. Route drift is checked by
+The public OpenAPI file is `openapi/restec-pos-partner-v1.yaml`. Route drift is checked by
 `scripts/validate-openapi.ts`, but that script deliberately scans only `/health` and `/v1/*`;
 checkout and internal routes are outside its public route comparison.
 

@@ -38,6 +38,10 @@ export interface AuthenticatedPartner {
   signingSecret: string;
   status: 'active' | 'overlap';
   keyPrefix: string;
+  scopes?: string[];
+  locationScopes?: string[];
+  credentialVersion?: number;
+  graceEndsAt?: Date;
   expiresAt?: Date;
 }
 export interface AuthorizedLocation {
@@ -110,6 +114,8 @@ export interface ClaimedPosOutboxEvent {
   id: string;
   publicEventId: string;
   connectionId: string;
+  partnerId: string;
+  environment: Environment;
   eventType: string;
   schemaVersion: string;
   payload: CanonicalRestecEvent;

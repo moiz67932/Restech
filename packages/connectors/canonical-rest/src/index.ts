@@ -1,4 +1,9 @@
-import { billSchema, eventSchema, externalPaymentSchema } from '@restec/contracts';
+import {
+  billSchema,
+  eventSchema,
+  externalPaymentSchema,
+  partnerWebhookEventSchema,
+} from '@restec/contracts';
 import type { PosConnector } from '@restec/connector-sdk';
 import { signEvent } from '@restec/security';
 export const canonicalRestConnector: PosConnector = {
@@ -14,7 +19,28 @@ export const canonicalRestConnector: PosConnector = {
   },
   async serializeEvent(input, ctx) {
     const event = eventSchema.parse(input);
-    const body = JSON.stringify(event);
+    const body = JSON.stringify(
+      partnerWebhookEventSchema.parse({
+        event_id: event.id,
+        event_type: event.type,
+        event_version: '1.0',
+        occurred_at: event.created_at,
+        environment: ctx.environment === 'production' ? 'production' : 'sandbox',
+        partner_id: ctx.partnerId,
+        location_id: event.data.location_id,
+        external_bill_id: event.data.external_bill_id,
+        ...(event.data.payment_session_id
+          ? { payment_session_id: event.data.payment_session_id }
+          : {}),
+        payment_reference: event.data.payment.restec_payment_id,
+        amount_minor: event.data.payment.amount,
+        currency: event.data.payment.currency,
+        payment_method: event.data.payment.method,
+        payment_status: event.data.payment.status,
+        bill: event.data.bill,
+        metadata: {},
+      }),
+    );
     const destination = String(ctx.configuration.webhook_url ?? '');
     return { body, destination };
   },

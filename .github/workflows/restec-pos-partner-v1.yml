@@ -1,0 +1,89 @@
+name: Restec POS Partner v1 required checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  partner-contract-and-leakage:
+    name: Partner contract and leakage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run validate:openapi
+      - run: npm run validate:public-artifacts
+      - run: npm run test:leakage
+      - run: npm run test:examples:node
+
+  financial-invariants:
+    name: Financial state and exactly-once invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:e2e:mock
+
+  quality-and-build:
+    name: Lint typecheck format and production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: git diff --check
+
+  database-contract:
+    name: Database migrations leases and atomic outbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run db:start
+      - run: npm run db:reset
+      - run: npm run db:lint
+      - run: npm run check:migrations
+      - name: Run database integration tests
+        run: |
+          eval "$(npx supabase status -o env)"
+          SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" RUN_DATABASE_INTEGRATION=true npm run test:database
+
+  compiled-partner-examples:
+    name: Compile C# Java and shell examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - run: dotnet build examples/csharp/RestecPartnerExamples.csproj --configuration Release
+      - run: javac -d examples/java/.build examples/java/RestecPartnerExample.java
+      - run: java -cp examples/java/.build RestecPartnerExample
+      - run: bash -n examples/curl/restec.sh
+
+  dependency-security:
+    name: Dependency vulnerability gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm audit --audit-level=high

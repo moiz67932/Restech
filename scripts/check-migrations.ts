@@ -17,6 +17,13 @@ for (const required of [
   'accept_private_event',
   'release_expired_pos_outbox_leases',
   'store_sandbox_credentials',
+  'provision_pos_partner',
+  'rotate_pos_partner_credential',
+  'revoke_pos_partner_credential',
+  'credential_version',
+  'location_scopes',
+  'grace_ends_at',
+  'rotated_from',
 ])
   if (!all.includes(required)) throw new Error(`Migration set missing ${required}`);
 

@@ -35,7 +35,7 @@ The existing private event schema accepted only completed, failed, and refunded 
 - Persistence: `packages/database/src/repository.ts`, `supabase-repository.ts`, `supabase/migrations`, `supabase/seed.sql`.
 - Private boundary: `packages/paely-client/src/index.ts`.
 - POS delivery: `packages/connectors/canonical-rest/src/index.ts`, `packages/webhook-delivery/src/index.ts`.
-- Public artifacts: `docs/openapi/restec-pos-public-api.yaml`, `docs/postman`, `docs/samples`, `docs/RESTEC_POS_INTEGRATION_GUIDE.md`, `apps/docs/app/page.tsx`.
+- Public artifacts: `openapi/restec-pos-partner-v1.yaml`, `postman`, `examples`, `docs/pos-partner`, `docs/RESTEC_POS_INTEGRATION_GUIDE.md`, `apps/docs/app/page.tsx`.
 - Operations: `.env.example`, `scripts`, `apps/api/vercel.json`, `.github/workflows/phase2.yml`.
 
 ## Database impact

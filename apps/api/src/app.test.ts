@@ -154,19 +154,10 @@ test('sandbox receiver preflight validates identity, environment, HMAC, and exac
     });
   };
   assert.equal((await request(event)).status, 202);
-  assert.equal(
-    (await request(event, { 'X-Paely-Service-Id': 'old-service' })).status,
-    401,
-  );
-  assert.equal(
-    (await request(event, { 'X-Paely-Environment': 'production' })).status,
-    401,
-  );
+  assert.equal((await request(event, { 'X-Paely-Service-Id': 'old-service' })).status, 401);
+  assert.equal((await request(event, { 'X-Paely-Environment': 'production' })).status, 401);
   assert.equal((await request(event, {}, 'wrong-secret')).status, 401);
-  assert.equal(
-    (await request({ ...event, schema_version: 'legacy' } as typeof event)).status,
-    400,
-  );
+  assert.equal((await request({ ...event, schema_version: 'legacy' } as typeof event)).status, 400);
 });
 
 test('legacy generic payload with extra correlation_id remains unsupported', async () => {

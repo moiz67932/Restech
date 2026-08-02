@@ -93,6 +93,25 @@ test(
     ]);
     assert.equal(inbox, 1);
     assert.equal(outbox, 1);
+
+    if (process.env.RUN_DATABASE_INTEGRATION === 'true') {
+      const claims = await Promise.all([
+        db.rpc('claim_pos_outbox', { p_limit: 100, p_lease_seconds: 60 }),
+        db.rpc('claim_pos_outbox', { p_limit: 100, p_lease_seconds: 60 }),
+      ]);
+      for (const claim of claims) assert.equal(claim.error, null);
+      const matchingClaims = claims
+        .flatMap((claim) => claim.data ?? [])
+        .filter((row) => row.public_event_id === publicId);
+      assert.equal(matchingClaims.length, 1, 'concurrent claims must lease an event exactly once');
+      const { error: completionError } = await db.rpc('complete_pos_outbox_delivery', {
+        p_event_id: matchingClaims[0]!.id,
+        p_attempt: Number(matchingClaims[0]!.attempt_count) + 1,
+        p_status: 204,
+        p_duration: 1,
+      });
+      assert.equal(completionError, null);
+    }
   },
 );
 test(

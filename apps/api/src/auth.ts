@@ -24,7 +24,12 @@ export const publicAuth =
     const apiKey = auth.startsWith('Bearer ') ? auth.slice(7) : '';
     const targetEnvironment = config.RESTEC_ENV === 'production' ? 'production' : 'sandbox';
     const credential = await repo.authenticateApiKey(apiKey, targetEnvironment);
-    if (!credential || (credential.expiresAt && credential.expiresAt <= new Date())) {
+    if (
+      !credential ||
+      (credential.expiresAt && credential.expiresAt <= new Date()) ||
+      (credential.status === 'overlap' &&
+        (!credential.graceEndsAt || credential.graceEndsAt <= new Date()))
+    ) {
       if (rateLimiter) {
         const source =
           c.req.header('CF-Connecting-IP') ??
@@ -44,9 +49,11 @@ export const publicAuth =
     }
     if (rateLimiter) {
       let limited;
+      const path = new URL(c.req.url).pathname;
+      const rateLimitLocation = path.match(/^\/v1\/locations\/([^/]+)/)?.[1] ?? 'global';
       try {
         limited = await rateLimiter.consume({
-          key: `partner:${credential.partnerId}:path:${new URL(c.req.url).pathname}`,
+          key: `credential:${credential.keyPrefix}:location:${rateLimitLocation}:path:${path}`,
           limit: 100,
           windowSeconds: 60,
         });
@@ -55,7 +62,10 @@ export const publicAuth =
       }
       if (!limited.allowed) {
         c.header('Retry-After', String(limited.retryAfterSeconds));
-        throw new ApiError(429, 'rate_limited', 'The request rate limit was exceeded.');
+        throw new ApiError(429, 'rate_limited', 'The request rate limit was exceeded.', {
+          retryable: true,
+          retry_after_seconds: limited.retryAfterSeconds,
+        });
       }
     }
     if (
@@ -64,6 +74,13 @@ export const publicAuth =
       (config.RESTEC_ENV !== 'production' && !auth.startsWith('Bearer rst_test_'))
     )
       throw new ApiError(401, 'invalid_credentials', 'The supplied credentials are invalid.');
+    const locationId = new URL(c.req.url).pathname.match(/^\/v1\/locations\/([^/]+)/)?.[1];
+    if (
+      locationId &&
+      credential.locationScopes &&
+      !credential.locationScopes.includes(decodeURIComponent(locationId))
+    )
+      throw new ApiError(403, 'access_denied', 'Access to this location is denied.');
     const rawBody = new Uint8Array(await c.req.raw.clone().arrayBuffer());
     if (c.req.header('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
       throw new ApiError(400, 'invalid_request', 'Content-Type must be application/json.');
@@ -96,6 +113,7 @@ export const publicAuth =
     c.set('credential', credential);
     c.set('rawBody', rawBody);
     c.set('requestId', requestId);
+    c.header('X-Request-Id', requestId);
     await next();
   };
 export const requestHash = (method: string, path: string, raw: Uint8Array) =>

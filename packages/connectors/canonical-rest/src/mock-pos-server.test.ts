@@ -17,6 +17,7 @@ test('mock POS server verifies signed events and exposes retry/permanent respons
     assert.equal(req.url, '/integrations/restec/webhooks');
     assert.equal(req.headers['x-restec-event-id'], 'evt_mockpos1');
     assert.equal(req.headers['x-restec-delivery-attempt'], '1');
+    assert.equal(req.headers['x-restec-environment'], 'sandbox');
     assert(
       verifyEventSignature({
         secret: 'webhook-secret',
@@ -25,7 +26,14 @@ test('mock POS server verifies signed events and exposes retry/permanent respons
         rawBody: raw,
       }),
     );
-    assert.equal(JSON.parse(raw.toString('utf8')).schema_version, '2026-07-01');
+    const event = JSON.parse(raw.toString('utf8'));
+    assert.equal(event.event_id, 'evt_mockpos1');
+    assert.equal(event.event_type, 'payment.completed');
+    assert.equal(event.event_version, '1.0');
+    assert.equal(event.environment, 'sandbox');
+    assert.equal(event.partner_id, 'ptr_test');
+    assert.equal(event.amount_minor, 100);
+    assert.equal(event.payment_reference, 'pay_mock1');
     accepted++;
     res.writeHead(status, { 'content-type': 'text/plain' });
     res.end('response body must not be persisted');

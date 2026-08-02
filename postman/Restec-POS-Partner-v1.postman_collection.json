@@ -1,11 +1,11 @@
 {
   "info": {
-    "name": "Restec Sandbox API",
+    "name": "Restec POS Partner v1",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "description": "Signed Restec POS sandbox requests. Never store real secrets in the collection."
   },
   "variable": [
-    { "key": "base_url", "value": "https://sandbox-api.restec.io" },
+    { "key": "base_url", "value": "https://sandbox-api.restec.example" },
     { "key": "api_key", "value": "rst_test_replace" },
     { "key": "request_signing_secret", "value": "replace" },
     { "key": "webhook_signing_secret", "value": "replace" },
@@ -22,10 +22,11 @@
         "exec": [
           "const timestamp = Math.floor(Date.now()/1000).toString();",
           "const requestId = 'req_' + pm.variables.replaceIn('{{$guid}}').replaceAll('-', '');",
-          "const path = '/' + pm.request.url.path.join('/');",
+          "const resolvedUrl = new URL(pm.variables.replaceIn(pm.request.url.toString()));",
+          "const path = resolvedUrl.pathname;",
           "const rawBody = pm.request.body && pm.request.body.mode === 'raw' ? pm.variables.replaceIn(pm.request.body.raw) : '';",
           "const input = timestamp + '.' + pm.request.method.toUpperCase() + '.' + path + '.' + rawBody;",
-          "const signature = CryptoJS.HmacSHA256(input, pm.collectionVariables.get('request_signing_secret')).toString(CryptoJS.enc.Hex);",
+          "const signature = CryptoJS.HmacSHA256(input, pm.variables.get('request_signing_secret')).toString(CryptoJS.enc.Hex);",
           "pm.variables.set('timestamp', timestamp); pm.variables.set('request_id', requestId); pm.variables.set('signature', 'v1=' + signature);"
         ]
       }
@@ -146,24 +147,6 @@
           { "key": "X-Request-Id", "value": "{{request_id}}" }
         ],
         "url": "{{base_url}}/v1/locations/{{location_id}}/payment-sessions/{{payment_session_id}}"
-      }
-    },
-    {
-      "name": "Sandbox payment completed",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
-          { "key": "X-Restec-Signature", "value": "{{signature}}" },
-          { "key": "X-Request-Id", "value": "{{request_id}}" },
-          { "key": "Idempotency-Key", "value": "scenario-payment-completed-{{external_bill_id}}" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\"scenario\":\"payment.completed\",\"external_bill_id\":\"{{external_bill_id}}\",\"amount\":10000}"
-        },
-        "url": "{{base_url}}/v1/test/scenarios"
       }
     }
   ]

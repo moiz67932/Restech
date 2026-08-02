@@ -365,14 +365,13 @@ test('private dependency diagnostics are logged internally while the public 502 
       body,
     });
     assert.equal(response.status, 502);
-    assert.deepEqual(await response.json(), {
-      error: {
-        code: 'dependency_unavailable',
-        message: 'The requested operation could not be completed at this time.',
-        request_id: requestId,
-        details: { retryable: true },
-      },
-    });
+    assert.match(response.headers.get('content-type') ?? '', /^application\/problem\+json/);
+    const problem = (await response.json()) as any;
+    assert.equal(problem.status, 502);
+    assert.equal(problem.code, 'dependency_unavailable');
+    assert.equal(problem.request_id, requestId);
+    assert.equal(problem.retryable, true);
+    assert.equal(problem.error.code, 'dependency_unavailable');
   } finally {
     console.error = originalConsoleError;
   }
