@@ -9,5 +9,15 @@
       "maxDuration": 30,
       "includeFiles": "{dist/**,../../packages/**/{package.json,dist/**}}"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/internal/jobs/dispatch-pos-events",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/jobs/reconcile-payment-sessions",
+      "schedule": "*/5 * * * *"
+    }
+  ]
 }

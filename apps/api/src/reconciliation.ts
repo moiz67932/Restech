@@ -34,7 +34,15 @@ export class ReconciliationService {
     let remote: Awaited<ReturnType<PaelyClient['getBill']>>;
     try {
       remote = await this.client.getBill(connection.privateLocationId, externalBillId);
-    } catch {
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'reconciliation.private_bill_failed',
+          connection_id: connection.connectionId,
+          external_bill_id: externalBillId,
+          error_type: error instanceof Error ? error.name : typeof error,
+        }),
+      );
       return { status: 'pending', differences: [] };
     }
     const differences = fields.flatMap((field) =>
@@ -74,12 +82,22 @@ export class ReconciliationService {
     let reviewRequired = 0;
     for (const session of sessions) {
       if (new Date(session.expiresAt).getTime() <= Date.now()) {
-        await this.repo.transitionPaymentSession(
-          session.publicPaymentSessionId,
-          'expired',
-          new Date().toISOString(),
-        );
+        await this.repo.createAuditLog({
+          actorType: 'service',
+          actorId: 'payment_session_reconciliation',
+          partnerId: session.partnerId,
+          connectionId: session.connectionId,
+          action: 'payment_session.expiry_event_pending',
+          result: 'review_required',
+          targetType: 'payment_session',
+          targetId: session.publicPaymentSessionId,
+          metadata: {
+            local_status: session.status,
+            expires_at: session.expiresAt,
+          },
+        });
         expired++;
+        reviewRequired++;
         continue;
       }
       if (!session.privatePaymentSessionReference) {
@@ -117,14 +135,59 @@ export class ReconciliationService {
           });
           continue;
         }
-        if (remote.status !== session.status)
+        if (remote.status !== session.status) {
+          const remoteTerminal = [
+            'paid',
+            'failed',
+            'expired',
+            'cancelled',
+            'refunded',
+            'partially_refunded',
+          ].includes(remote.status);
+          if (remoteTerminal) {
+            reviewRequired++;
+            await this.repo.createAuditLog({
+              actorType: 'service',
+              actorId: 'payment_session_reconciliation',
+              partnerId: session.partnerId,
+              connectionId: session.connectionId,
+              action: 'payment_session.private_terminal_event_missing',
+              result: 'review_required',
+              targetType: 'payment_session',
+              targetId: session.publicPaymentSessionId,
+              metadata: {
+                local_status: session.status,
+                private_status: remote.status,
+              },
+            });
+            console.error(
+              JSON.stringify({
+                event: 'payment_session.reconciliation_terminal_event_missing',
+                payment_session_id: session.publicPaymentSessionId,
+                private_payment_session_id: session.privatePaymentSessionReference,
+                canonical_status: session.status,
+                provider_status: remote.status,
+              }),
+            );
+            continue;
+          }
           await this.repo.transitionPaymentSession(
             session.publicPaymentSessionId,
             remote.status,
             remote.paidAt ?? new Date().toISOString(),
           );
+        }
         matched++;
-      } catch {
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'payment_session.reconciliation_failed',
+            payment_session_id: session.publicPaymentSessionId,
+            private_payment_session_id: session.privatePaymentSessionReference,
+            canonical_status: session.status,
+            error_type: error instanceof Error ? error.name : typeof error,
+          }),
+        );
         await this.repo.createAuditLog({
           actorType: 'service',
           actorId: 'payment_session_reconciliation',
@@ -134,6 +197,10 @@ export class ReconciliationService {
           result: 'pending',
           targetType: 'payment_session',
           targetId: session.publicPaymentSessionId,
+          metadata: {
+            local_status: session.status,
+            error_type: error instanceof Error ? error.name : typeof error,
+          },
         });
       }
     }

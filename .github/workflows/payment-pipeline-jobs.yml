@@ -1,0 +1,44 @@
+name: Payment pipeline recovery jobs
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: payment-pipeline-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Dispatch leased POS events
+        env:
+          RESTEC_API_BASE_URL: ${{ secrets.RESTEC_API_BASE_URL }}
+          RESTEC_INTERNAL_JOB_TOKEN: ${{ secrets.RESTEC_INTERNAL_JOB_TOKEN }}
+        run: |
+          test -n "$RESTEC_API_BASE_URL"
+          test -n "$RESTEC_INTERNAL_JOB_TOKEN"
+          curl --fail-with-body --silent --show-error \
+            --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer $RESTEC_INTERNAL_JOB_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "${RESTEC_API_BASE_URL%/}/api/internal/jobs/dispatch-pos-events"
+      - name: Reconcile stuck payment sessions
+        env:
+          RESTEC_API_BASE_URL: ${{ secrets.RESTEC_API_BASE_URL }}
+          RESTEC_INTERNAL_JOB_TOKEN: ${{ secrets.RESTEC_INTERNAL_JOB_TOKEN }}
+        run: |
+          test -n "$RESTEC_API_BASE_URL"
+          test -n "$RESTEC_INTERNAL_JOB_TOKEN"
+          curl --fail-with-body --silent --show-error \
+            --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer $RESTEC_INTERNAL_JOB_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{"limit":25}' \
+            "${RESTEC_API_BASE_URL%/}/api/internal/jobs/reconcile-payment-sessions"

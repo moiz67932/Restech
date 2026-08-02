@@ -9,6 +9,7 @@ import { MemoryRepository } from './memory-repository.js';
 import {
   assertCheckoutDestination,
   assertResolvedCheckoutDestination,
+  paymentStatusFromEvent,
 } from './payment-sessions.js';
 
 const enabledConfig: Config = {
@@ -37,6 +38,11 @@ const enabledConfig: Config = {
   RESTEC_INTERNAL_JOB_TOKEN: '1234567890123456',
   RESTEC_STRICT_RATE_LIMITING: false,
 };
+
+test('provider cancellation remains a distinct terminal session state', () => {
+  assert.equal(paymentStatusFromEvent('payment.failed', 'cancelled'), 'cancelled');
+  assert.equal(paymentStatusFromEvent('payment.failed', 'failed'), 'failed');
+});
 const apiKey = 'rst_test_aaaaaaaaaaaaexample';
 const requestSecret = 'request-secret';
 const webhookSecret = 'webhook-secret';
@@ -183,6 +189,19 @@ async function createHostedPaymentSession(
   assert.equal(response.status, 201, await response.clone().text());
   return ((await response.json()) as { payment_session_id: string }).payment_session_id;
 }
+
+test('customer return polling stops as soon as the payment session is terminal', async () => {
+  const { app, repo } = fixture();
+  const publicId = await createHostedPaymentSession(app, 'return-polling');
+  const pending = await app.request(`/s/${publicId}/return`);
+  assert.match(await pending.text(), /http-equiv="refresh"/);
+
+  await repo.transitionPaymentSession(publicId, 'paid', new Date().toISOString());
+  const completed = await app.request(`/s/${publicId}/return`);
+  const completedHtml = await completed.text();
+  assert.doesNotMatch(completedHtml, /http-equiv="refresh"/);
+  assert.match(completedHtml, /Status: paid/);
+});
 
 test('payment session is Restec-only, encrypted at rest, idempotent, and refreshes before redirect', async () => {
   const { app, repo, privateCalls, refreshCalls } = fixture();
@@ -612,7 +631,7 @@ test('authoritative event wins, deduplicates, updates the bill, and dummy POS ve
   });
   const publicId = ((await created.json()) as any).payment_session_id;
   await app.request(`/s/${publicId}/cancel`);
-  assert.equal((await repo.getPaymentSession(publicId))?.status, 'cancelled');
+  assert.equal((await repo.getPaymentSession(publicId))?.status, 'requires_customer_action');
 
   const eventBody = JSON.stringify({
     id: 'private-payment-event-1',

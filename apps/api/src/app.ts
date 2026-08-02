@@ -605,9 +605,20 @@ export function createApp(deps: {
       });
       return c.redirect(destination.toString(), 303);
     } catch (error) {
-      await deps.repository
-        .releasePaymentSessionCheckoutRefresh(session.publicPaymentSessionId, refreshLockToken)
-        .catch(() => undefined);
+      try {
+        await deps.repository.releasePaymentSessionCheckoutRefresh(
+          session.publicPaymentSessionId,
+          refreshLockToken,
+        );
+      } catch (releaseError) {
+        console.error(
+          JSON.stringify({
+            event: 'payment_session.checkout_refresh_release_failed',
+            payment_session_id: session.publicPaymentSessionId,
+            error_type: releaseError instanceof Error ? releaseError.name : typeof releaseError,
+          }),
+        );
+      }
       throw error;
     }
   });
@@ -615,25 +626,67 @@ export function createApp(deps: {
     const session = await browserPaymentSession(c.req.param('paymentSessionId'));
     c.header('Cache-Control', 'no-store, max-age=0');
     c.header('Referrer-Policy', 'no-referrer');
-    const status = session.status === 'paid' ? 'paid' : 'confirmation_pending';
+    const locallyExpired =
+      new Date(session.expiresAt).getTime() <= Date.now() &&
+      ['creating', 'requires_customer_action', 'processing'].includes(session.status);
+    const terminalStatuses = new Set([
+      'paid',
+      'failed',
+      'cancelled',
+      'expired',
+      'refunded',
+      'partially_refunded',
+    ]);
+    const renderedSessionStatus = locallyExpired ? 'expired' : session.status;
+    const terminal = terminalStatuses.has(renderedSessionStatus);
+    const messages: Record<string, string> = {
+      paid: 'Payment confirmed and synchronized through Restec.',
+      failed: 'Payment failed. Please try another payment method.',
+      cancelled: 'Payment was cancelled and no further confirmation is pending.',
+      expired: 'The payment session expired before confirmation was received.',
+      refunded: 'This payment has been refunded.',
+      partially_refunded: 'This payment has been partially refunded.',
+    };
+    const status = terminal ? renderedSessionStatus : 'confirmation_pending';
     const message =
-      status === 'paid'
-        ? 'Payment confirmed and synchronized through Restec.'
-        : 'Payment confirmation may still be processing. Your POS will be updated after confirmation.';
+      messages[renderedSessionStatus] ||
+      'Payment confirmation may still be processing. Your POS will be updated after confirmation.';
+    console.info(
+      JSON.stringify({
+        event: terminal ? 'payment_session.polling_finished' : 'payment_session.polling_continues',
+        payment_id: null,
+        payment_attempt_id: null,
+        private_payment_session_id: session.privatePaymentSessionReference,
+        provider_session_id: session.privatePaymentSessionReference,
+        provider_transaction_id: null,
+        canonical_status: renderedSessionStatus,
+        session_status: renderedSessionStatus,
+        order_id: null,
+        event_type: null,
+        webhook_id: null,
+      }),
+    );
+    const refresh = terminal
+      ? ''
+      : `<meta http-equiv="refresh" content="${deps.config.RESTEC_PAYMENT_SESSION_RETURN_POLL_SECONDS}">`;
     return c.html(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="${deps.config.RESTEC_PAYMENT_SESSION_RETURN_POLL_SECONDS}"><title>Restec payment status</title></head><body><main><h1>Payment status</h1><p>${message}</p><p>Status: ${status}</p></main></body></html>`,
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">${refresh}<title>Restec payment status</title></head><body><main><h1>Payment status</h1><p>${message}</p><p>Status: ${status}</p></main></body></html>`,
     );
   });
   app.get('/s/:paymentSessionId/cancel', async (c) => {
     const session = await browserPaymentSession(c.req.param('paymentSessionId'));
     c.header('Cache-Control', 'no-store, max-age=0');
     c.header('Referrer-Policy', 'no-referrer');
-    if (session.status === 'requires_customer_action')
-      await deps.repository.transitionPaymentSession(
-        session.publicPaymentSessionId,
-        'cancelled',
-        new Date().toISOString(),
-      );
+    await deps.repository.createAuditLog({
+      actorType: 'customer',
+      partnerId: session.partnerId,
+      connectionId: session.connectionId,
+      action: 'payment_session.customer_returned_from_cancel',
+      result: 'accepted',
+      targetType: 'payment_session',
+      targetId: session.publicPaymentSessionId,
+      metadata: { provider_state_unchanged: true, local_status: session.status },
+    });
     return c.html(
       '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Restec payment status</title></head><body><main><h1>Payment not completed</h1><p>No payment confirmation has been received. A later verified payment confirmation will still be synchronized through Restec.</p></main></body></html>',
     );
@@ -718,6 +771,29 @@ export function createApp(deps: {
     });
   });
   app.post('/api/internal/events/paely/v1', async (c) => {
+    const webhookStartedAt = Date.now();
+    const webhookLog = (stage: string, fields: Record<string, unknown> = {}) =>
+      console.info(
+        JSON.stringify({
+          event: `payment_webhook.${stage}`,
+          stage,
+          payment_id: null,
+          payment_attempt_id: null,
+          merchant_payment_account_id: null,
+          private_payment_session_id: null,
+          provider_session_id: null,
+          provider_transaction_id: null,
+          provider_status: null,
+          canonical_status: null,
+          attempt_status: null,
+          session_status: null,
+          order_id: null,
+          event_type: null,
+          webhook_id: c.req.header('X-Paely-Event-Id') ?? null,
+          processing_duration_ms: Date.now() - webhookStartedAt,
+          ...fields,
+        }),
+      );
     if (c.req.header('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
       throw new ApiError(400, 'invalid_request', 'Content-Type must be application/json.');
     const declaredLength = Number(c.req.header('Content-Length') ?? 0);
@@ -730,6 +806,11 @@ export function createApp(deps: {
     const signature = c.req.header('X-Paely-Signature') ?? '';
     const privateId = c.req.header('X-Paely-Event-Id') ?? '';
     const deliveryAttempt = Number(c.req.header('X-Paely-Delivery-Attempt'));
+    webhookLog('webhook_received', {
+      delivery_attempt: Number.isSafeInteger(deliveryAttempt) ? deliveryAttempt : null,
+      raw_body_bytes: raw.byteLength,
+      verification_status: 'pending',
+    });
     if (
       !verifyTimestamp(timestamp, undefined, deps.config.RESTEC_TIMESTAMP_TOLERANCE_SECONDS) ||
       !verifyEventSignature({
@@ -742,7 +823,13 @@ export function createApp(deps: {
       deliveryAttempt < 1
     )
       throw new ApiError(401, 'invalid_credentials', 'The event signature is invalid.');
+    webhookLog('webhook_verified', {
+      verified: true,
+      delivery_attempt: deliveryAttempt,
+      raw_body_bytes: raw.byteLength,
+    });
     const parsed = parseRaw(raw);
+    webhookLog('webhook_parsed');
     if (
       parsed &&
       typeof parsed === 'object' &&
@@ -762,6 +849,12 @@ export function createApp(deps: {
       return c.json({ accepted: true, contract: '2026-07-01' }, 202);
     }
     const incoming = privateEvent.parse(parsed);
+    webhookLog('event_recognized', {
+      event_type: incoming.type,
+      webhook_id: incoming.id,
+      payment_id: incoming.data.payment.payment_id,
+      provider_status: incoming.data.payment.status,
+    });
     if (
       incoming.data.payment_session &&
       (c.req.header('X-Paely-Service-Id') !== deps.config.PAELY_EVENT_SERVICE_ID ||
@@ -797,6 +890,16 @@ export function createApp(deps: {
       );
       if (!session || session.environment !== deploymentEnvironment)
         throw new ApiError(404, 'resource_not_found', 'The payment session was not found.');
+      webhookLog('canonical_payment_loaded', {
+        event_type: incoming.type,
+        webhook_id: incoming.id,
+        payment_id: incoming.data.payment.payment_id,
+        private_payment_session_id: incoming.data.payment_session.private_payment_session_id,
+        provider_session_id: incoming.data.payment_session.private_payment_session_id,
+        provider_status: incoming.data.payment.status,
+        canonical_status: session.status,
+        session_status: session.status,
+      });
       if (
         con.connectionId !== session.connectionId ||
         session.privateConnectionReference !== incoming.data.connection_id
@@ -806,6 +909,16 @@ export function createApp(deps: {
           'connection_reference_mismatch',
           'The event connection does not match the payment session.',
         );
+      webhookLog('status_extracted', {
+        event_type: incoming.type,
+        webhook_id: incoming.id,
+        payment_id: incoming.data.payment.payment_id,
+        private_payment_session_id: incoming.data.payment_session.private_payment_session_id,
+        provider_session_id: incoming.data.payment_session.private_payment_session_id,
+        provider_status: incoming.data.payment.status,
+        canonical_status: incoming.data.payment_session.status,
+        session_status: incoming.data.payment_session.status,
+      });
       if (
         mappedLocation.locationId !== session.locationId ||
         session.privateLocationReference !== incoming.data.location_id
@@ -845,7 +958,10 @@ export function createApp(deps: {
           'payment_method_mismatch',
           'The payment method does not match the payment session.',
         );
-      if (incoming.data.payment_session.status !== paymentStatusFromEvent(incoming.type))
+      if (
+        incoming.data.payment_session.status !==
+        paymentStatusFromEvent(incoming.type, incoming.data.payment_session.status)
+      )
         throw new ApiError(
           400,
           'payment_status_mismatch',
@@ -907,12 +1023,39 @@ export function createApp(deps: {
       ? await deps.repository.acceptPaymentSessionEvent({
           ...eventInput,
           publicPaymentSessionId: incoming.data.payment_session.restec_payment_session_reference,
-          requestedStatus: paymentStatusFromEvent(incoming.type),
+          requestedStatus: paymentStatusFromEvent(
+            incoming.type,
+            incoming.data.payment_session.status,
+          ),
         })
       : await deps.repository.acceptPrivateEvent(eventInput);
+    const committedStatus = incoming.data.payment_session?.status ?? null;
+    for (const stage of [
+      'payment_updated',
+      'attempt_updated',
+      'order_updated',
+      'session_updated',
+      'transaction_committed',
+      'frontend_notified',
+    ]) {
+      webhookLog(stage, {
+        event_type: incoming.type,
+        webhook_id: incoming.id,
+        payment_id: incoming.data.payment.payment_id,
+        private_payment_session_id:
+          incoming.data.payment_session?.private_payment_session_id ?? null,
+        provider_session_id:
+          incoming.data.payment_session?.private_payment_session_id ?? null,
+        provider_status: incoming.data.payment.status,
+        canonical_status: committedStatus,
+        session_status: committedStatus,
+        duplicate: accepted.duplicate,
+        component_status: stage === 'attempt_updated' ? 'not_applicable_in_restec' : 'committed',
+      });
+    }
     return c.json({ accepted: true, event_id: accepted.eventId }, accepted.duplicate ? 200 : 202);
   });
-  app.post('/api/internal/jobs/dispatch-pos-events', async (c) => {
+  app.on(['GET', 'POST'], '/api/internal/jobs/dispatch-pos-events', async (c) => {
     if (!jobAuthorized(c.req.header('Authorization')))
       throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
     await deps.repository.releaseExpiredLeases();
@@ -957,9 +1100,22 @@ export function createApp(deps: {
         outcome = result.outcome;
         status = result.status;
         errorCode = result.errorCode;
-      } catch {
+      } catch (error) {
         outcome = 'retry';
         errorCode = `${phase}_error`;
+        console.error(
+          JSON.stringify({
+            event: 'pos_outbox.delivery_failed',
+            outbox_event_id: event.id,
+            public_event_id: event.publicEventId,
+            event_type: event.eventType,
+            connection_id: event.connectionId,
+            attempt,
+            phase,
+            error_type: error instanceof Error ? error.name : typeof error,
+            processing_duration_ms: Date.now() - started,
+          }),
+        );
       }
       const deliveryAttempt = {
         eventId: event.id,
@@ -996,6 +1152,15 @@ export function createApp(deps: {
         retried++;
       }
     }
+    console.info(
+      JSON.stringify({
+        event: 'pos_outbox.dispatch_finished',
+        claimed: claimed.length,
+        delivered,
+        retried,
+        dead_lettered: deadLettered,
+      }),
+    );
     return c.json(
       { accepted: true, claimed: claimed.length, delivered, retried, dead_lettered: deadLettered },
       202,
@@ -1049,7 +1214,7 @@ export function createApp(deps: {
     });
     return c.json(result);
   });
-  app.post('/api/internal/jobs/reconcile-payment-sessions', async (c) => {
+  app.on(['GET', 'POST'], '/api/internal/jobs/reconcile-payment-sessions', async (c) => {
     if (!jobAuthorized(c.req.header('Authorization')))
       throw new ApiError(404, 'resource_not_found', 'The requested resource was not found.');
     if (!deps.config.RESTEC_PAYMENT_SESSIONS_ENABLED)
@@ -1069,6 +1234,22 @@ export function createApp(deps: {
   });
   app.onError((error, c) => {
     const requestId = c.get('requestId') ?? `req_${randomUUID().replaceAll('-', '')}`;
+    if (!(error instanceof PrivateDependencyError))
+      console.error(
+        JSON.stringify({
+          event: 'restec.request_failed',
+          request_id: requestId,
+          method: c.req.method,
+          path: new URL(c.req.url).pathname,
+          error_type: error instanceof Error ? error.name : typeof error,
+          error_code:
+            error instanceof ApiError || error instanceof RepositoryError
+              ? error.code
+              : error instanceof ZodError
+                ? 'invalid_request'
+                : 'internal_error',
+        }),
+      );
     if (error instanceof ZodError)
       return c.json(
         {

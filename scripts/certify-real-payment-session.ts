@@ -883,7 +883,7 @@ export async function main() {
     throw new Error('The Paely certification base URL must use HTTPS.');
   const paelyDispatchPath =
     process.env.PAELY_CERTIFICATION_DISPATCH_PATH ??
-    '/api/internal/integrations/restec/v1/jobs/dispatch-outbox';
+    '/api/internal/integrations/restec/v1/outbox/dispatch';
   if (!paelyDispatchPath.startsWith('/') || paelyDispatchPath.startsWith('//'))
     throw new Error('PAELY_CERTIFICATION_DISPATCH_PATH must be an absolute path.');
   const paelyDispatchUrl = paelyBase ? new URL(paelyDispatchPath, paelyBase) : undefined;

@@ -865,9 +865,11 @@ export class SupabaseRepository implements RestecRepository {
     });
     dbError(error);
     const result = data?.[0];
+    if (!result || typeof result.event_id !== 'string' || typeof result.accepted !== 'boolean')
+      throw new Error('event_commit_incomplete');
     return {
-      eventId: result?.event_id ?? input.publicEventId,
-      duplicate: result?.accepted === false,
+      eventId: result.event_id,
+      duplicate: result.accepted === false,
     };
   }
   async getMockPosWebhookContext(eventId: string) {

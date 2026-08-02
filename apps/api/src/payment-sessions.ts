@@ -153,7 +153,11 @@ export function paymentSessionResponse(record: PaymentSessionRecord, checkoutBas
   };
 }
 
-export const paymentStatusFromEvent = (eventType: string): PaymentSessionStatus => {
+export const paymentStatusFromEvent = (
+  eventType: string,
+  reportedStatus?: PaymentSessionStatus,
+): PaymentSessionStatus => {
+  if (eventType === 'payment.failed' && reportedStatus === 'cancelled') return 'cancelled';
   const statuses: Record<string, PaymentSessionStatus> = {
     'payment.completed': 'paid',
     'payment.failed': 'failed',
