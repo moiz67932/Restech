@@ -190,17 +190,30 @@ async function createHostedPaymentSession(
   return ((await response.json()) as { payment_session_id: string }).payment_session_id;
 }
 
-test('customer return polling stops as soon as the payment session is terminal', async () => {
-  const { app, repo } = fixture();
-  const publicId = await createHostedPaymentSession(app, 'return-polling');
-  const pending = await app.request(`/s/${publicId}/return`);
-  assert.match(await pending.text(), /http-equiv="refresh"/);
+test('customer return polling stops for every terminal payment-session state', async (t) => {
+  for (const terminal of [
+    'paid',
+    'failed',
+    'cancelled',
+    'expired',
+    'refunded',
+    'partially_refunded',
+  ] as const) {
+    await t.test(terminal, async () => {
+      const { app, repo } = fixture();
+      const publicId = await createHostedPaymentSession(app, `return-polling-${terminal}`);
+      const pending = await app.request(`/s/${publicId}/return`);
+      assert.match(await pending.text(), /http-equiv="refresh"/);
 
-  await repo.transitionPaymentSession(publicId, 'paid', new Date().toISOString());
-  const completed = await app.request(`/s/${publicId}/return`);
-  const completedHtml = await completed.text();
-  assert.doesNotMatch(completedHtml, /http-equiv="refresh"/);
-  assert.match(completedHtml, /Status: paid/);
+      if (terminal === 'refunded' || terminal === 'partially_refunded')
+        await repo.transitionPaymentSession(publicId, 'paid', new Date().toISOString());
+      await repo.transitionPaymentSession(publicId, terminal, new Date().toISOString());
+      const completed = await app.request(`/s/${publicId}/return`);
+      const completedHtml = await completed.text();
+      assert.doesNotMatch(completedHtml, /http-equiv="refresh"/);
+      assert.match(completedHtml, new RegExp(`Status: ${terminal}`));
+    });
+  }
 });
 
 test('payment session is Restec-only, encrypted at rest, idempotent, and refreshes before redirect', async () => {

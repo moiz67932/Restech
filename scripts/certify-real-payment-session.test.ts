@@ -9,7 +9,9 @@ import {
   certificationStages,
   cleanupCertificationBill,
   createCertificationCancellationHandler,
+  createCertificationDeadline,
   createPaymentSessionWithCleanup,
+  isCertificationPass,
   monitorCertification,
   paelyCertificationDiagnosticsPath,
   reportPollingHttpResponse,
@@ -293,11 +295,68 @@ test('processed Safepay payment for the previously timed-out session completes p
     sleep: async () => undefined,
   });
   assert.equal(paelyDispatches, 1);
-  assert.equal(pollReports.length, 2);
+  assert.equal(pollReports.length, 1);
   assert.equal((pollReports[0]?.paely_evidence as any)?.signature_valid, true);
   assert.equal((pollReports[0]?.paely_evidence as any)?.verified, true);
   assert.equal((pollReports[0]?.paely_evidence as any)?.processed, true);
   assert.equal((pollReports[0]?.paely_evidence as any)?.paely_private_session_status, 'paid');
+});
+
+test('authoritative Restec evidence passes when Paely dispatcher acceleration is unavailable', async () => {
+  const reports: Array<{ stage: string; details?: Record<string, unknown> }> = [];
+  let closes = 0;
+  const result = await monitorCertification({
+    initialStatus: 'requires_customer_action',
+    timeoutMs: 1_000,
+    operator: { promise: new Promise<void>(() => undefined), close: () => closes++ },
+    readRestecStatus: async () => paidStatus,
+    readPaelyEvidence: async () => ({
+      dispatcher_status: 'credentials_not_configured',
+      dispatcher_acceleration: 'manual_dispatcher_acceleration_unavailable',
+    }),
+    readRestecEvidence: async () => deliveredRestec(),
+    reportStage: (stage, details) => reports.push({ stage, details }),
+  });
+
+  assert.equal(isCertificationPass(result.status, result.restec), true);
+  assert.equal(closes, 1);
+  const passReports = reports.filter(
+    ({ stage, details }) => stage === 'certification_passed' && details?.result === 'PASS',
+  );
+  assert.equal(passReports.length, 1);
+  assert.deepEqual(passReports[0]?.details?.public_session, paidStatus);
+  assert.deepEqual(passReports[0]?.details?.restec_evidence, deliveredRestec());
+});
+
+test('PASS predicate requires every final authoritative Restec condition', () => {
+  assert.equal(isCertificationPass(paidStatus, deliveredRestec()), true);
+  assert.equal(
+    isCertificationPass(paidStatus, deliveredRestec({ bill_payment_status: 'pending' })),
+    false,
+  );
+  assert.equal(
+    isCertificationPass(paidStatus, deliveredRestec({ private_event_accepted: false })),
+    false,
+  );
+  assert.equal(
+    isCertificationPass(paidStatus, deliveredRestec({ dead_lettered: undefined })),
+    false,
+  );
+});
+
+test('certification deadline cleanup clears its timer exactly once', () => {
+  const fakeTimer = { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+  let clears = 0;
+  const deadline = createCertificationDeadline(1_000, () => undefined, {
+    set: () => fakeTimer,
+    clear: (timer) => {
+      assert.equal(timer, fakeTimer);
+      clears++;
+    },
+  });
+  deadline.close();
+  deadline.close();
+  assert.equal(clears, 1);
 });
 
 test('automatic progression succeeds without Enter and invokes configured dispatchers', async () => {
