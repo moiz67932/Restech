@@ -1,136 +1,130 @@
-const topics = [
-  [
-    'Introduction',
-    'Restec is an alternate digital payment integration interface for restaurant POS systems. Synchronize bills, report completed external payments, receive signed payment events, and reconcile after downtime.',
-  ],
-  [
-    'Architecture from POS perspective',
-    'The POS communicates only with the Restec public API and one signed Restec webhook. The physical table QR stays stable; send the correct external_table_id for every bill.',
-  ],
-  [
-    'Quick Start',
-    'Obtain sandbox credentials, list tables, create a version-1 bill, register an HTTPS webhook, run payment.completed, verify and deduplicate the event, then retrieve the bill.',
-  ],
-  [
-    'Authentication',
-    'Send Bearer rst_test_... in sandbox or rst_live_... in production. Credentials are isolated, revocable, rotatable, and full keys are displayed once.',
-  ],
-  [
-    'Request Signing',
-    'HMAC-SHA256 lowercase hex over timestamp.METHOD.path.exact_raw_body. Send X-Restec-Timestamp, X-Restec-Signature, and a fresh X-Request-Id.',
-  ],
-  [
-    'Idempotency',
-    'Every mutation needs a stable Idempotency-Key. Exact replay returns the original response; reuse with different input returns a conflict.',
-  ],
-  [
-    'Sandbox and Production',
-    'Restec supplies the environment-specific API hostname during onboarding. Credentials and data never cross environments.',
-  ],
-  [
-    'Create or Update Bill',
-    'PUT /v1/locations/{locationId}/bills/{externalBillId}. New bills start at version 1. Use integer minor units and reconcile every item and total exactly.',
-  ],
-  [
-    'Retrieve Bill',
-    'GET the bill path for canonical payment state after downtime or an ambiguous request. GET has an empty signed body and no idempotency key.',
-  ],
-  [
-    'External POS Payments',
-    'Report completed cash, card terminal, wallet terminal, voucher, or other payments. Never send card numbers, CVV, PIN, track, or raw wallet credentials.',
-  ],
-  [
-    'Hosted Payment Sessions',
-    'Create a card payment session for an open bill, open only the returned Restec checkout URL, then wait for a verified Restec payment.completed webhook or query the signed status endpoint. The initial state requires customer action.',
-  ],
-  [
-    'Tables',
-    'GET /v1/locations/{locationId}/tables and use its external_table_id in bill requests. Only active authorized mappings are accepted.',
-  ],
-  [
-    'Payment Webhooks',
-    'Events are payment.completed, payment.failed, payment.expired, payment.refunded, and payment.partially_refunded. Hosted-payment events include a Restec payment_session_id.',
-  ],
-  [
-    'Webhook Verification',
-    'Verify timestamp.exact_raw_body with the webhook secret before parsing. Store the event ID uniquely and apply the invoice update once before returning 2xx.',
-  ],
-  [
-    'Payment Statuses',
-    'Close the invoice only when payment_status is paid and amount_due is zero. A hosted checkout redirect or return page is never proof of payment.',
-  ],
-  [
-    'Retries',
-    'Temporary delivery failures retry after 30s, 2m, 10m, 30m, 2h, 6h, and 12h with the same event ID. Permanent failures become visible for review.',
-  ],
-  [
-    'Error Codes',
-    'Errors use a stable code, safe message, request ID, and details. Quote the request ID to support; never include secrets in a ticket.',
-  ],
-  [
-    'Sandbox Scenarios',
-    'Coordinate UAT scenarios with Restec; sandbox test controls are not part of the public partner API.',
-  ],
-  [
-    'Certification',
-    'Prove signature rejection, versioning, duplicate safety, external payments, partial/full state, webhook durability, retries, dead-letter visibility, and credential isolation.',
-  ],
-  [
-    'API Changelog',
-    'Current HTTP version: v1. Current partner event version: 1.0. Compatible optional fields may be added; breaking changes receive a new version and migration window.',
-  ],
-  [
-    'Support',
-    'Send environment, request or event ID, UTC time, endpoint, status, and a redacted summary. Never send full API keys or signing secrets.',
-  ],
-] as const;
+import Link from 'next/link';
 
-const slug = (value: string) => value.toLowerCase().replaceAll(' ', '-');
-export default function Docs() {
+const cards = [
+  [
+    'Bill synchronization',
+    'Keep bills, revisions, tables, and totals aligned.',
+    '/docs/bill-and-order-sync',
+  ],
+  [
+    'Customer payment sessions',
+    'Open a secure hosted payment session and wait for authoritative status.',
+    '/docs/customer-payment-sync',
+  ],
+  [
+    'Cash and terminal payments',
+    'Report completed POS-originated payment facts safely.',
+    '/docs/traditional-payment-sync',
+  ],
+  [
+    'Signed payment webhooks',
+    'Verify, deduplicate, and commit one POS update per event.',
+    '/docs/webhooks',
+  ],
+  [
+    'Idempotent retries',
+    'Retry ambiguous mutations without creating a second financial result.',
+    '/docs/idempotency-and-retries',
+  ],
+  [
+    'Multi-location credentials',
+    'Use scoped, environment-specific credentials for each location.',
+    '/docs/credential-ownership',
+  ],
+];
+
+export default function Home() {
   return (
-    <main
-      style={{
-        maxWidth: 1100,
-        margin: '0 auto',
-        padding: 32,
-        fontFamily: 'system-ui',
-        lineHeight: 1.55,
-      }}
-    >
-      <header>
-        <strong>Restec Developers</strong>
-        <p>Sandbox · Production</p>
-        <h1>One contract for restaurant POS payments</h1>
-        <p>Public API, signed events, reliable retries, and reconciliation.</p>
-      </header>
-      <nav
-        aria-label="Documentation sections"
-        style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}
-      >
-        {topics.map(([title]) => (
-          <a key={title} href={`#${slug(title)}`}>
-            {title}
-          </a>
-        ))}
-      </nav>
-      <section>
-        <h2>Signed bill request</h2>
-        <pre style={{ overflowX: 'auto', padding: 16, background: '#f3f5f4' }}>
-          <code>{`curl -X PUT https://sandbox-api.restec.example/v1/locations/loc_example/bills/INV-1001 \\\n  -H "Authorization: Bearer rst_test_replace" \\\n  -H "Content-Type: application/json" \\\n  -H "X-Restec-Timestamp: <unix-seconds>" \\\n  -H "X-Restec-Signature: v1=<hmac>" \\\n  -H "X-Request-Id: req_<unique>" \\\n  -H "Idempotency-Key: bill-INV-1001-v1" \\\n  --data-binary @bill.json`}</code>
-        </pre>
-      </section>
-      {topics.map(([title, text]) => (
-        <section id={slug(title)} key={title}>
-          <h2>{title}</h2>
-          <p>{text}</p>
-        </section>
-      ))}
-      <footer>
-        <p>
-          See the Restec POS API reference, integration guide, language samples, sandbox collection,
-          and certification checklist.
+    <main>
+      <section className="hero shell">
+        <div className="eyebrow">RESTEC PARTNER API · VERSION 1</div>
+        <h1>Payments that stay in sync with your POS.</h1>
+        <p className="lede">
+          A clear, signed contract for restaurant bill synchronization, customer payments,
+          traditional payments, and reliable webhook delivery.
         </p>
-      </footer>
+        <div className="actions">
+          <Link className="button primary" href="/docs/quickstart">
+            Start integration →
+          </Link>
+          <Link className="button" href="/api-reference">
+            Explore API reference
+          </Link>
+          <Link className="text-button" href="/resources/postman">
+            Download Postman
+          </Link>
+        </div>
+        <div className="architecture">
+          <div>
+            <b>Restaurant POS</b>
+            <span>bill + payment facts</span>
+          </div>
+          <i>↔</i>
+          <div className="accent">
+            <b>Restec Partner API</b>
+            <span>signed requests + events</span>
+          </div>
+          <i>↔</i>
+          <div>
+            <b>Restec-managed systems</b>
+            <span>authoritative payment state</span>
+          </div>
+        </div>
+      </section>
+      <section className="shell section">
+        <div className="section-heading">
+          <div>
+            <div className="eyebrow">THE CONTRACT</div>
+            <h2>Everything your integration needs.</h2>
+          </div>
+          <Link href="/docs">Browse all guides →</Link>
+        </div>
+        <div className="card-grid">
+          {cards.map(([title, text, href]) => (
+            <Link className="feature-card" href={href} key={title}>
+              <span className="card-mark">+</span>
+              <h3>{title}</h3>
+              <p>{text}</p>
+              <span className="arrow">↗</span>
+            </Link>
+          ))}
+        </div>
+      </section>
+      <section className="shell callout">
+        <div>
+          <div className="eyebrow">IMPORTANT · V1 LIMITATION</div>
+          <h2>Know what is not supported.</h2>
+          <p>
+            POS-initiated refund, void, and reversal operations are unavailable in v1. Refund events
+            may be delivered as authoritative notifications; the POS cannot initiate them through
+            this API.
+          </p>
+        </div>
+        <Link className="button" href="/docs/compatibility">
+          Read compatibility policy
+        </Link>
+      </section>
+      <section className="shell split section">
+        <div>
+          <div className="eyebrow">A FAST START</div>
+          <h2>Build your first sandbox request in minutes.</h2>
+          <p>
+            Get environment credentials, sign the exact request bytes, upsert a bill, and verify the
+            resulting webhook with the language example that matches your stack.
+          </p>
+          <Link href="/docs/quickstart" className="inline-link">
+            Read the quickstart →
+          </Link>
+        </div>
+        <div className="code-card">
+          <div className="code-label">request.sh</div>
+          <pre>
+            <code>{`PUT /v1/locations/{location_id}/bills/{external_bill_id}
+X-Restec-Signature: v1=&lt;lowercase-hmac&gt;
+Idempotency-Key: bill-INV-1001-v1`}</code>
+          </pre>
+        </div>
+      </section>
     </main>
   );
 }

@@ -9,6 +9,8 @@
 /supabase/migrations/ @moiz67932
 /openapi/ @moiz67932
 /docs/pos-partner/ @moiz67932
+/apps/docs/ @moiz67932
+/scripts/validate-docs-portal.mjs @moiz67932
 /postman/ @moiz67932
 /examples/ @moiz67932
 /.github/workflows/ @moiz67932
