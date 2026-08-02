@@ -11,8 +11,7 @@ and use a stable idempotency key for each mutation body.
 
 ## Bills, tables, and customer payments
 
-List authorized tables, then create each bill with a new external bill ID at
-version 1. Send complete higher-version snapshots when the bill changes.
+List authorized tables, then create each bill with a new external bill ID at version 1. Send complete higher-version snapshots when the bill changes.
 Create a hosted payment session for customer card entry and open only the
 returned Restec checkout URL. Confirm completion through a verified webhook or
 the signed payment-session status endpoint.
