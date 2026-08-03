@@ -180,7 +180,7 @@ a:hover {
 .section-heading {
   display: flex;
   justify-content: space-between;
-  align-items: end;
+  align-items: flex-end;
   margin-bottom: 25px;
 }
 .section h2,

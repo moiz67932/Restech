@@ -9,6 +9,26 @@ Create separate projects and do not share environment credentials.
 | Restec Docs           | `apps/docs`    | `docs.restec.io`        | public                  |
 | Restec Portal/Demo    | `apps/portal`  | `portal.restec.io`      | protected               |
 
+## Documentation project build settings
+
+Use these settings for the separate restec-docs project:
+
+| Setting             | Value                         |
+| ------------------- | ----------------------------- |
+| Framework Preset    | Next.js                       |
+| Root Directory      | apps/docs                     |
+| Build Command       | npm run build                 |
+| Install Command     | npm ci --include=dev          |
+| Output Directory    | Leave blank / Next.js default |
+| Development Command | npm run dev                   |
+| Node.js Version     | 24.x                          |
+
+Enable Include source files outside of the Root Directory in the Build Step.
+The docs build reads canonical Markdown, OpenAPI, Postman, and example files
+from repository-root directories. Disable Skip deployments when there are no
+changes to the root directory or its dependencies, because those canonical
+files are outside apps/docs and must trigger docs deployments.
+
 ## API project build settings
 
 Use these exact Vercel project settings for both Restec API projects:
