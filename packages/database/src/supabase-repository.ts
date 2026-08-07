@@ -17,7 +17,15 @@ import type {
   CompletePaymentSessionCheckoutRefreshInput,
   PaymentSessionEventInput,
   MockPosReceipt,
+  ReserveBillCapacityInput,
+  ReserveBillMutationInput,
+  FinancialReservationResult,
   RestecRepository,
+  CustomerTableView,
+  TableLifecycleSyncInput,
+  FinancialCorrection,
+  ReconciliationCase,
+  ReconciliationAction,
 } from './repository.js';
 import {
   eventSchema,
@@ -34,12 +42,57 @@ const apiKeyParts = (key: string) => {
   const match = /^rst_(?:test|live)_([a-f0-9]{12})[A-Za-z0-9_-]+$/.exec(key);
   return match?.[1] ?? null;
 };
+const reconciliationCaseRow = (row: any): ReconciliationCase => ({
+  caseId: row.case_id,
+  logicalIdentity: row.logical_identity,
+  environment: row.environment,
+  partnerId: row.partner_id,
+  locationId: row.location_id,
+  connectionId: row.connection_id,
+  subjectType: row.subject_type,
+  subjectId: row.subject_id,
+  caseType: row.case_type,
+  severity: row.severity,
+  status: row.status,
+  detectedAt: row.detected_at,
+  firstDetectedAt: row.first_detected_at,
+  lastCheckedAt: row.last_checked_at,
+  occurrenceCount: row.occurrence_count,
+  restecStateSnapshot: row.restec_state_snapshot ?? {},
+  providerStateSnapshot: row.provider_state_snapshot ?? undefined,
+  posDeliveryStateSnapshot: row.pos_delivery_state_snapshot ?? undefined,
+  immutableFinancialEvidence: row.immutable_financial_evidence ?? undefined,
+  differenceSummary: row.difference_summary ?? {},
+  recommendedAction: row.recommended_action,
+  automaticActionAllowed: row.automatic_action_allowed,
+  assignedTo: row.assigned_to ?? undefined,
+  resolution: row.resolution ?? undefined,
+  resolutionEvidence: row.resolution_evidence ?? undefined,
+  resolvedAt: row.resolved_at ?? undefined,
+  createdBy: row.created_by,
+  lastActionId: row.last_action_id ?? undefined,
+});
+const reconciliationActionRow = (row: any): ReconciliationAction => ({
+  actionId: row.action_id,
+  caseId: row.case_id,
+  actionType: row.action_type,
+  idempotencyIdentity: row.idempotency_identity,
+  requestedBy: row.requested_by,
+  startedAt: row.started_at,
+  completedAt: row.completed_at ?? undefined,
+  result: row.result,
+  error: row.error ?? undefined,
+  evidence: row.evidence ?? undefined,
+});
 const publicRepositoryCodes = new Set([
   'resource_not_found',
   'replay_detected',
   'idempotency_conflict',
   'bill_version_conflict',
   'payment_in_progress',
+  'payment_capacity_conflict',
+  'bill_financial_floor_conflict',
+  'payment_outcome_ambiguous',
   'bill_already_paid',
   'amount_mismatch',
   'invalid_status_transition',
@@ -51,6 +104,8 @@ const publicRepositoryCodes = new Set([
   'external_bill_reference_mismatch',
   'payment_method_mismatch',
   'payment_status_mismatch',
+  'table_active_bill_conflict',
+  'bill_table_generation_conflict',
 ]);
 const dbError = (error: { message: string } | null) => {
   if (error) {
@@ -301,6 +356,131 @@ export class SupabaseRepository implements RestecRepository {
     const row = rows.find((v) => v.external_table_id === externalTableId);
     return row ? { ...row, connection_id: connectionId } : null;
   }
+  async provisionTableQr(
+    connectionId: string,
+    externalTableId: string,
+    tokenHash: string,
+    environment: Environment,
+  ) {
+    const { data, error } = await this.db
+      .from('table_mappings')
+      .update({
+        qr_token_hash: tokenHash,
+        qr_environment: environment,
+        qr_version: 1,
+        qr_rotated_at: new Date().toISOString(),
+      })
+      .eq('connection_id', connectionId)
+      .eq('external_table_id', externalTableId)
+      .eq('active', true)
+      .select('id')
+      .maybeSingle();
+    dbError(error);
+    if (!data) throw new RepositoryError('resource_not_found');
+  }
+  private safeTableView(row: any, ended = false): CustomerTableView {
+    if (!row) return { status: 'invalid_link' };
+    if (!row.active || row.connection_active === false) return { status: 'table_unavailable' };
+    if (!row.session) return { status: 'no_active_bill', table_name: row.table_name };
+    if (ended || row.session.status !== 'active')
+      return { status: 'session_ended', table_name: row.table_name };
+    const bill = row.session.bill_mappings?.public_state;
+    if (!bill) return { status: 'session_ended', table_name: row.table_name };
+    return {
+      status: 'active',
+      table_name: row.table_name,
+      bill: {
+        order_status: bill.order_status,
+        payment_status: bill.payment_status,
+        currency: bill.currency,
+        grand_total: bill.grand_total,
+        amount_paid: bill.amount_paid,
+        amount_due: bill.amount_due,
+      },
+    };
+  }
+  async resolveTableQr(tokenHash: string, environment: Environment) {
+    const { data, error } = await this.db
+      .from('table_mappings')
+      .select(
+        'connection_id,external_table_id,active,pos_tables!inner(name),pos_connections!inner(location_id,status),table_sessions(id,location_id,status,environment,external_bill_id,bill_mappings(public_state))',
+      )
+      .eq('qr_token_hash', tokenHash)
+      .eq('qr_environment', environment)
+      .maybeSingle();
+    dbError(error);
+    if (!data) return { status: 'invalid_link' } as const;
+    const activeSession = (data.table_sessions ?? []).find(
+      (v: any) => v.status === 'active' && v.environment === environment,
+    );
+    const row = {
+      ...data,
+      table_name: (Array.isArray(data.pos_tables) ? data.pos_tables[0] : data.pos_tables)?.name,
+      connection_active:
+        (Array.isArray(data.pos_connections) ? data.pos_connections[0] : data.pos_connections)
+          ?.status === 'active',
+      session: activeSession,
+    };
+    const view = this.safeTableView(row);
+    return activeSession
+      ? {
+          ...view,
+          tableSessionId: activeSession.id,
+          connectionId: data.connection_id,
+          locationId: activeSession.location_id,
+        }
+      : view;
+  }
+  async createCustomerVisit(tableSessionId: string, tokenHash: string, environment: Environment) {
+    const { error } = await this.db
+      .from('customer_table_visits')
+      .insert({ token_hash: tokenHash, table_session_id: tableSessionId, environment });
+    dbError(error);
+  }
+  async resolveCustomerVisit(tokenHash: string, environment: Environment) {
+    const { data, error } = await this.db
+      .from('customer_table_visits')
+      .select(
+        'environment,table_sessions(status,environment,external_bill_id,connection_id,external_table_id,bill_mappings(public_state),pos_connections!inner(status),table_mappings!inner(active,pos_tables!inner(name)))',
+      )
+      .eq('token_hash', tokenHash)
+      .maybeSingle();
+    dbError(error);
+    if (!data || data.environment !== environment) return { status: 'invalid_link' } as const;
+    const session = Array.isArray(data.table_sessions)
+      ? data.table_sessions[0]
+      : data.table_sessions;
+    const mapping: any = Array.isArray(session?.table_mappings)
+      ? session.table_mappings[0]
+      : session?.table_mappings;
+    return this.safeTableView(
+      {
+        active: mapping?.active,
+        connection_active:
+          (Array.isArray(session?.pos_connections)
+            ? session.pos_connections[0]
+            : session?.pos_connections
+          )?.status === 'active',
+        table_name: (Array.isArray(mapping?.pos_tables)
+          ? mapping.pos_tables[0]
+          : mapping?.pos_tables
+        )?.name,
+        session,
+      },
+      session?.status !== 'active',
+    );
+  }
+  async syncTableLifecycle(input: TableLifecycleSyncInput) {
+    const { error } = await this.db.rpc('sync_table_lifecycle', {
+      p_connection_id: input.connectionId,
+      p_location_id: input.locationId,
+      p_environment: input.environment,
+      p_external_table_id: input.externalTableId,
+      p_external_bill_id: input.externalBillId,
+      p_terminal: input.terminal,
+    });
+    dbError(error);
+  }
   async validateBillMutation(
     connectionId: string,
     externalBillId: string,
@@ -356,6 +536,70 @@ export class SupabaseRepository implements RestecRepository {
       .maybeSingle();
     dbError(error);
     return (data?.public_state as CanonicalBillState) ?? null;
+  }
+  async reserveBillMutation(input: ReserveBillMutationInput) {
+    const { data, error } = await this.db.rpc('reserve_bill_mutation', {
+      p_connection_id: input.connectionId,
+      p_external_bill_id: input.externalBillId,
+      p_version: input.version,
+      p_request_hash: input.requestHash,
+      p_new_total_minor: input.newTotalMinor,
+      p_currency: input.currency,
+    });
+    dbError(error);
+    return data as { kind: 'proceed' } | { kind: 'replay'; state: CanonicalBillState };
+  }
+  async markBillMutationAmbiguous(
+    connectionId: string,
+    externalBillId: string,
+    version: number,
+    requestHash: string,
+  ) {
+    const { error } = await this.db.rpc('mark_bill_mutation_ambiguous', {
+      p_connection_id: connectionId,
+      p_external_bill_id: externalBillId,
+      p_version: version,
+      p_request_hash: requestHash,
+    });
+    dbError(error);
+  }
+  async reserveBillCapacity(input: ReserveBillCapacityInput): Promise<FinancialReservationResult> {
+    const { data, error } = await this.db.rpc('reserve_bill_capacity', {
+      p_connection_id: input.connectionId,
+      p_external_bill_id: input.externalBillId,
+      p_reservation_identity: input.reservationIdentity,
+      p_channel: input.channel,
+      p_amount_minor: input.amountMinor,
+      p_currency: input.currency,
+      p_request_hash: input.requestHash,
+      p_expires_at: input.expiresAt ?? null,
+    });
+    dbError(error);
+    return {
+      state: data.state,
+      created: data.created,
+      projection: {
+        billTotalMinor: Number(data.projection.bill_total_minor),
+        completedPaymentMinor: Number(data.projection.completed_payment_minor),
+        activeReservedMinor: Number(data.projection.active_reserved_minor),
+        ambiguousPendingMinor: Number(data.projection.ambiguous_pending_minor),
+        refundedMinor: Number(data.projection.refunded_minor),
+        availableMinor: Number(data.projection.available_minor),
+      },
+      ...(data.completed_state ? { completedState: data.completed_state } : {}),
+    };
+  }
+  async markFinancialReservationAmbiguous(
+    connectionId: string,
+    reservationIdentity: string,
+    requestHash: string,
+  ) {
+    const { error } = await this.db.rpc('mark_financial_reservation_ambiguous', {
+      p_connection_id: connectionId,
+      p_reservation_identity: reservationIdentity,
+      p_request_hash: requestHash,
+    });
+    dbError(error);
   }
   async validateExternalPayment(
     connectionId: string,
@@ -416,6 +660,27 @@ export class SupabaseRepository implements RestecRepository {
     return data as CanonicalBillState;
   }
   async acceptPrivateEvent(input: PrivateEventInput) {
+    const correction = input.publicPayload.data.correction;
+    if (correction) {
+      const recorded = await this.recordProviderCorrection({
+        correctionId: correction.correction_id,
+        logicalIdentity: `${input.connectionId}:${input.publicPayload.data.external_bill_id}:${correction.original_payment_id}:${correction.type}:${correction.amount}:${correction.currency}`,
+        type: correction.type,
+        status: correction.status,
+        connectionId: input.connectionId,
+        externalBillId: input.publicPayload.data.external_bill_id,
+        originalPaymentId: correction.original_payment_id,
+        amountMinor: correction.amount,
+        currency: correction.currency,
+        authority: 'provider',
+        source: 'provider_event',
+        occurredAt: input.publicPayload.created_at,
+      });
+      input.publicPayload = {
+        ...input.publicPayload,
+        data: { ...input.publicPayload.data, bill: recorded.bill as any },
+      };
+    }
     const { data, error } = await this.db.rpc('accept_private_event', {
       p_private_event_id: input.privateEventId,
       p_event_type: input.eventType,
@@ -432,6 +697,49 @@ export class SupabaseRepository implements RestecRepository {
       eventId: row?.event_id ?? input.publicEventId,
       duplicate: row?.accepted === false,
     };
+  }
+  async recordProviderCorrection(input: FinancialCorrection) {
+    const { data, error } = await this.db.rpc('record_provider_correction', {
+      p_correction_id: input.correctionId,
+      p_logical_identity: input.logicalIdentity,
+      p_type: input.type,
+      p_status: input.status,
+      p_connection_id: input.connectionId,
+      p_external_bill_id: input.externalBillId,
+      p_original_payment_id: input.originalPaymentId,
+      p_amount_minor: input.amountMinor,
+      p_currency: input.currency,
+      p_occurred_at: input.occurredAt,
+    });
+    dbError(error);
+    return {
+      correction: input,
+      duplicate: data?.duplicate === true,
+      bill: data?.bill as CanonicalBillState,
+    };
+  }
+  async listFinancialCorrections(connectionId: string, externalBillId: string) {
+    const { data, error } = await this.db
+      .from('financial_corrections')
+      .select('*')
+      .eq('connection_id', connectionId)
+      .eq('external_bill_id', externalBillId)
+      .order('occurred_at', { ascending: true });
+    dbError(error);
+    return (data ?? []).map((row: any) => ({
+      correctionId: row.correction_id,
+      logicalIdentity: row.logical_identity,
+      type: row.type,
+      status: row.status,
+      connectionId: row.connection_id,
+      externalBillId: row.external_bill_id,
+      originalPaymentId: row.original_payment_id,
+      amountMinor: Number(row.amount_minor),
+      currency: row.currency,
+      authority: row.authority,
+      source: row.source,
+      occurredAt: row.occurred_at,
+    })) as FinancialCorrection[];
   }
   async getConnectionForPrivateEvent(privateConnectionId: string) {
     const { data, error } = await this.db
@@ -511,10 +819,34 @@ export class SupabaseRepository implements RestecRepository {
           connectorType: failureMode ? 'mock_pos' : connection.connectorType,
           connectorVersion: failureMode ? '1.0.0' : connection.connectorVersion,
           connectorEnabled: connection.connectorEnabled,
+          signingSecretVersion: Number(row.signing_secret_version ?? 1),
+          ...(await this.readWebhookSecret(
+            row.connection_id,
+            Number(row.signing_secret_version ?? 1),
+          )),
         });
       }
     }
     return result;
+  }
+  private async readWebhookSecret(connectionId: string, version: number) {
+    const { data, error } = await this.db
+      .from('webhook_secret_versions')
+      .select('encrypted_secret,status')
+      .eq('connection_id', connectionId)
+      .eq('version', version)
+      .maybeSingle();
+    dbError(error);
+    // Retired material remains decryptable for events that were bound before
+    // cutover. Revoked material is the only immediate delivery stop.
+    if (!data?.encrypted_secret || data.status === 'revoked') return {};
+    try {
+      return {
+        webhookSigningSecret: decryptSecret(data.encrypted_secret, this.config.secretEncryptionKey),
+      };
+    } catch {
+      return {};
+    }
   }
   private async authorizeConnection(id: string) {
     const { data, error } = await this.db
@@ -654,7 +986,7 @@ export class SupabaseRepository implements RestecRepository {
       type === 'payment.refunded'
         ? Math.min(nextPaid, bill.amount_refunded + paid)
         : bill.amount_refunded;
-    const nextDue = Math.max(0, grandTotal - nextPaid + nextRefunded);
+    const nextDue = Math.max(0, grandTotal - nextPaid);
     const payload = eventSchema.parse({
       id: eventId,
       type,
@@ -859,6 +1191,27 @@ export class SupabaseRepository implements RestecRepository {
     return { record: paymentSessionRow(result.session), changed: Boolean(result.changed) };
   }
   async acceptPaymentSessionEvent(input: PaymentSessionEventInput) {
+    const correction = input.publicPayload.data.correction;
+    if (correction) {
+      const recorded = await this.recordProviderCorrection({
+        correctionId: correction.correction_id,
+        logicalIdentity: `${input.connectionId}:${input.publicPayload.data.external_bill_id}:${correction.original_payment_id}:${correction.type}:${correction.amount}:${correction.currency}`,
+        type: correction.type,
+        status: correction.status,
+        connectionId: input.connectionId,
+        externalBillId: input.publicPayload.data.external_bill_id,
+        originalPaymentId: correction.original_payment_id,
+        amountMinor: correction.amount,
+        currency: correction.currency,
+        authority: 'provider',
+        source: 'provider_event',
+        occurredAt: input.publicPayload.created_at,
+      });
+      input.publicPayload = {
+        ...input.publicPayload,
+        data: { ...input.publicPayload.data, bill: recorded.bill as any },
+      };
+    }
     const { data, error } = await this.db.rpc('accept_payment_session_event', {
       p_private_event_id: input.privateEventId,
       p_event_type: input.eventType,
@@ -1001,5 +1354,86 @@ export class SupabaseRepository implements RestecRepository {
       .limit(limit);
     dbError(error);
     return (data ?? []).map(paymentSessionRow);
+  }
+  async upsertReconciliationCase(
+    input: Omit<
+      ReconciliationCase,
+      'caseId' | 'firstDetectedAt' | 'lastCheckedAt' | 'occurrenceCount'
+    >,
+  ) {
+    const row = {
+      logical_identity: input.logicalIdentity,
+      environment: input.environment,
+      partner_id: input.partnerId,
+      location_id: input.locationId,
+      connection_id: input.connectionId,
+      subject_type: input.subjectType,
+      subject_id: input.subjectId,
+      case_type: input.caseType,
+      severity: input.severity,
+      status: input.status,
+      detected_at: input.detectedAt,
+      restec_state_snapshot: input.restecStateSnapshot,
+      provider_state_snapshot: input.providerStateSnapshot ?? null,
+      pos_delivery_state_snapshot: input.posDeliveryStateSnapshot ?? null,
+      immutable_financial_evidence: input.immutableFinancialEvidence ?? null,
+      difference_summary: input.differenceSummary,
+      recommended_action: input.recommendedAction,
+      automatic_action_allowed: input.automaticActionAllowed,
+      assigned_to: input.assignedTo ?? null,
+      created_by: input.createdBy,
+    };
+    const { data, error } = await this.db.rpc('upsert_reconciliation_case', { p_case: row });
+    dbError(error);
+    return reconciliationCaseRow(data);
+  }
+  async getReconciliationCase(caseId: string) {
+    const { data, error } = await this.db
+      .from('reconciliation_cases')
+      .select('*')
+      .eq('case_id', caseId)
+      .maybeSingle();
+    dbError(error);
+    return data ? reconciliationCaseRow(data) : null;
+  }
+  async recordReconciliationAction(input: ReconciliationAction) {
+    const { data, error } = await this.db
+      .from('reconciliation_actions')
+      .upsert(
+        {
+          action_id: input.actionId,
+          case_id: input.caseId,
+          action_type: input.actionType,
+          idempotency_identity: input.idempotencyIdentity,
+          requested_by: input.requestedBy,
+          started_at: input.startedAt,
+          completed_at: input.completedAt ?? null,
+          result: input.result,
+          error: input.error ?? null,
+          evidence: input.evidence ?? {},
+        },
+        { onConflict: 'idempotency_identity', ignoreDuplicates: true },
+      )
+      .select('*')
+      .maybeSingle();
+    dbError(error);
+    return data ? reconciliationActionRow(data) : input;
+  }
+  async resolveReconciliationCase(
+    caseId: string,
+    resolution: string,
+    evidence: Record<string, unknown>,
+  ) {
+    const { error } = await this.db
+      .from('reconciliation_cases')
+      .update({
+        status: 'resolved',
+        resolution,
+        resolution_evidence: evidence,
+        resolved_at: new Date().toISOString(),
+      })
+      .eq('case_id', caseId)
+      .not('status', 'in', '(resolved,dismissed_with_evidence)');
+    dbError(error);
   }
 }

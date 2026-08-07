@@ -15,3 +15,28 @@ jobs:
       - run: npm run db:lint
       - run: npm run db:types
       - run: eval "$(npx supabase status -o env)"; SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" RUN_DATABASE_INTEGRATION=true npm run test:database
+  database-certification:
+    name: Restec PostgreSQL Financial Certification
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: . } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run db:start
+      - name: Apply migrations and run certification
+        shell: bash
+        run: |
+          eval "$(npx supabase status -o env)"
+          export SUPABASE_URL="$API_URL"
+          export SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
+          export RESTEC_ENV=test
+          export RESTEC_DATABASE_TARGET=ci
+          export RESTEC_DATABASE_CERTIFICATION=true
+          export RESTEC_ALLOW_DATABASE_RESET=true
+          export RUN_DATABASE_INTEGRATION=true
+          export RESTEC_CERTIFICATION_CONNECTION_ID=con_sandbox_canonical
+          npm run db:test:reset
+          npm run test:database:certify
+      - run: npm run db:stop

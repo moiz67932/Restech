@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { ZodError, z } from 'zod';
 import {
@@ -53,6 +53,14 @@ const privateEvent = z
         method: z.string(),
         status: z.string(),
       }),
+      correction: z
+        .object({
+          correction_id: z.string().min(1).max(128).optional(),
+          original_payment_id: z.string().min(1).max(128).optional(),
+          reason: z.string().max(256).optional(),
+        })
+        .strict()
+        .optional(),
       payment_session: z
         .object({
           private_payment_session_id: z.string().min(1).max(256),
@@ -185,33 +193,58 @@ export function createApp(deps: {
       if (!table || !table.active)
         throw new ApiError(404, 'resource_not_found', 'The requested table was not found.');
       const hash = requestHash(c.req.method, new URL(c.req.url).pathname, c.get('rawBody'));
-      const preflight = await deps.repository.validateBillMutation(
-        con.connectionId,
-        c.req.param('externalBillId'),
-        body.version,
-        hash,
-      );
+      const externalBillId = c.req.param('externalBillId');
+      const preflight = await deps.repository.reserveBillMutation({
+        connectionId: con.connectionId,
+        externalBillId,
+        version: body.version,
+        requestHash: hash,
+        newTotalMinor: body.totals.grand_total,
+        currency: body.currency,
+      });
       if (preflight.kind === 'replay')
         return { ...preflight.state, request_id: c.get('requestId') };
-      const privateResult = await deps.privateClient.upsertBillDetailed(
-        con.privateLocationId,
-        c.req.param('externalBillId'),
-        body,
-        privateKey,
-      );
+      let privateResult;
+      try {
+        privateResult = await deps.privateClient.upsertBillDetailed(
+          con.privateLocationId,
+          externalBillId,
+          body,
+          privateKey,
+        );
+      } catch (error) {
+        await deps.repository.markBillMutationAmbiguous(
+          con.connectionId,
+          externalBillId,
+          body.version,
+          hash,
+        );
+        if (error instanceof PrivateDependencyError) error.financiallyAmbiguous = true;
+        throw error;
+      }
       const result = {
         request_id: c.get('requestId'),
-        restec_bill_id: `bil_${sha256(`${con.connectionId}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
+        restec_bill_id: `bil_${sha256(`${con.connectionId}:${externalBillId}`).slice(0, 24)}`,
         ...privateResult.publicState,
       };
-      return deps.repository.saveBillState(
+      const saved = await deps.repository.saveBillState(
         con.connectionId,
-        c.req.param('externalBillId'),
+        externalBillId,
         body,
         result as any,
         hash,
         privateResult.privateBillReference,
       );
+      await deps.repository.syncTableLifecycle({
+        connectionId: con.connectionId,
+        locationId: con.locationId,
+        environment: deploymentEnvironment,
+        externalTableId: body.external_table_id,
+        externalBillId,
+        version: body.version,
+        terminal: body.status !== 'open',
+      });
+      return saved;
     }),
   );
   api.get('/v1/locations/:locationId/bills/:externalBillId', async (c) => {
@@ -221,7 +254,7 @@ export function createApp(deps: {
     return c.json({ ...value, request_id: c.get('requestId') } as any);
   });
   api.post('/v1/locations/:locationId/bills/:externalBillId/external-payments', async (c) =>
-    idempotent(c, 'external_payment', async (privateKey) => {
+    idempotent(c, 'external_payment', async () => {
       const con = await connection(c, 'payments:write');
       const body = externalPaymentSchema.parse(parseRaw(c.get('rawBody')));
       const hash = requestHash(c.req.method, new URL(c.req.url).pathname, c.get('rawBody'));
@@ -233,20 +266,48 @@ export function createApp(deps: {
       );
       if (preflight.kind === 'replay')
         return { ...preflight.state, request_id: c.get('requestId') };
-      const state = await deps.privateClient.recordExternalPayment(
-        con.privateLocationId,
-        c.req.param('externalBillId'),
-        body,
-        privateKey,
-      );
+      const externalBillId = c.req.param('externalBillId');
+      const reservationIdentity = `external_payment:${body.external_payment_id}`;
+      const reservation = await deps.repository.reserveBillCapacity({
+        connectionId: con.connectionId,
+        externalBillId,
+        reservationIdentity,
+        channel: 'external_payment',
+        amountMinor: body.amount,
+        currency: body.currency,
+        requestHash: hash,
+      });
+      if (reservation.state === 'completed' && reservation.completedState)
+        return { ...reservation.completedState, request_id: c.get('requestId') };
+      let state;
+      try {
+        state = await deps.privateClient.recordExternalPayment(
+          con.privateLocationId,
+          externalBillId,
+          body,
+          derivePrivateIdempotencyKey(
+            con.partnerId,
+            sha256(`${con.connectionId}:${body.external_payment_id}`),
+            'external_payment',
+          ),
+        );
+      } catch (error) {
+        await deps.repository.markFinancialReservationAmbiguous(
+          con.connectionId,
+          reservationIdentity,
+          hash,
+        );
+        if (error instanceof PrivateDependencyError) error.financiallyAmbiguous = true;
+        throw error;
+      }
       const result = {
         request_id: c.get('requestId'),
-        restec_bill_id: `bil_${sha256(`${con.connectionId}:${c.req.param('externalBillId')}`).slice(0, 24)}`,
+        restec_bill_id: `bil_${sha256(`${con.connectionId}:${externalBillId}`).slice(0, 24)}`,
         ...state,
       };
       const saved = await deps.repository.saveExternalPayment(
         con.connectionId,
-        c.req.param('externalBillId'),
+        externalBillId,
         body,
         result as any,
         hash,
@@ -330,6 +391,19 @@ export function createApp(deps: {
           new URL(c.req.url).pathname,
           c.get('rawBody'),
         );
+        const reservationIdentity = `payment_session:${publicId}`;
+        await deps.repository.reserveBillCapacity({
+          connectionId: con.connectionId,
+          externalBillId,
+          reservationIdentity,
+          channel: 'digital_session',
+          amountMinor: body.amount_minor,
+          currency: body.currency,
+          requestHash: requestFingerprint,
+          expiresAt: new Date(
+            Date.now() + deps.config.RESTEC_PAYMENT_SESSION_TTL_SECONDS * 1000,
+          ).toISOString(),
+        });
         const reserved = await deps.repository.reservePaymentSession({
           publicPaymentSessionId: publicId,
           environment: deploymentEnvironment,
@@ -355,30 +429,41 @@ export function createApp(deps: {
             deps.config.RESTEC_CHECKOUT_PUBLIC_BASE_URL,
           );
         const checkoutBase = deps.config.RESTEC_CHECKOUT_PUBLIC_BASE_URL!;
-        const privateResult = await deps.privateClient.createPaymentSession(
-          con.privateLocationId,
-          externalBillId,
-          {
-            connectionId: con.privateConnectionId,
-            amountMinor: body.amount_minor,
-            currency: body.currency,
-            method: body.method,
-            ...(body.customer
-              ? {
-                  customer: {
-                    ...(body.customer.email ? { email: body.customer.email } : {}),
-                    ...(body.customer.mobile ? { mobile: body.customer.mobile } : {}),
-                  },
-                }
-              : {}),
-            returnUrls: {
-              success: new URL(`/s/${publicId}/return`, checkoutBase).toString(),
-              cancel: new URL(`/s/${publicId}/cancel`, checkoutBase).toString(),
+        let privateResult;
+        try {
+          privateResult = await deps.privateClient.createPaymentSession(
+            con.privateLocationId,
+            externalBillId,
+            {
+              connectionId: con.privateConnectionId,
+              amountMinor: body.amount_minor,
+              currency: body.currency,
+              method: body.method,
+              ...(body.customer
+                ? {
+                    customer: {
+                      ...(body.customer.email ? { email: body.customer.email } : {}),
+                      ...(body.customer.mobile ? { mobile: body.customer.mobile } : {}),
+                    },
+                  }
+                : {}),
+              returnUrls: {
+                success: new URL(`/s/${publicId}/return`, checkoutBase).toString(),
+                cancel: new URL(`/s/${publicId}/cancel`, checkoutBase).toString(),
+              },
+              restecPaymentSessionReference: publicId,
             },
-            restecPaymentSessionReference: publicId,
-          },
-          privateKey,
-        );
+            privateKey,
+          );
+        } catch (error) {
+          await deps.repository.markFinancialReservationAmbiguous(
+            con.connectionId,
+            reservationIdentity,
+            requestFingerprint,
+          );
+          if (error instanceof PrivateDependencyError) error.financiallyAmbiguous = true;
+          throw error;
+        }
         let destination: URL;
         try {
           destination = await assertResolvedCheckoutDestination(
@@ -505,6 +590,81 @@ export function createApp(deps: {
     );
   });
   app.route('/', api);
+  app.post('/api/internal/table-qr/provision', async (c) => {
+    if (!jobAuthorized(c.req.header('Authorization')))
+      throw new ApiError(401, 'invalid_credentials', 'The supplied credentials are invalid.');
+    const body = z
+      .object({ connection_id: z.string().min(1), external_table_id: z.string().min(1).max(128) })
+      .strict()
+      .parse(await c.req.json());
+    const token = randomBytes(32).toString('base64url');
+    await deps.repository.provisionTableQr(
+      body.connection_id,
+      body.external_table_id,
+      sha256(token),
+      deploymentEnvironment,
+    );
+    return c.json(
+      { url: new URL(`/t/${token}`, deps.config.RESTEC_PUBLIC_BASE_URL).toString() },
+      201,
+    );
+  });
+  const customerHeaders = (c: any) => {
+    c.header('Cache-Control', 'private, no-store, max-age=0');
+    c.header('Pragma', 'no-cache');
+    c.header('Referrer-Policy', 'no-referrer');
+    c.header('X-Content-Type-Options', 'nosniff');
+  };
+  const customerPage = (c: any, view: any) => {
+    customerHeaders(c);
+    const text: Record<string, string> = {
+      active: 'Your current table bill is available.',
+      no_active_bill: 'No active order is available for this table yet.',
+      table_unavailable: 'This table is unavailable.',
+      session_ended: 'This table visit has ended.',
+      invalid_link: 'This table link is unavailable.',
+    };
+    const html = (value: unknown) =>
+      String(value).replace(/[&<>'"]/g, (character) => {
+        const escaped: Record<string, string> = {
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          "'": '&#39;',
+          '"': '&quot;',
+        };
+        return escaped[character]!;
+      });
+    const bill =
+      view.status === 'active'
+        ? `<p>Order: ${html(view.bill.order_status)}</p><p>Payment: ${html(view.bill.payment_status)}</p><p>Amount due: ${html(view.bill.amount_due)} ${html(view.bill.currency)}</p>`
+        : '';
+    return c.html(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Restec table</title></head><body><main><h1>${html(view.table_name ?? 'Restec table')}</h1><p>${text[view.status]}</p>${bill}</main></body></html>`,
+    );
+  };
+  app.get('/t/:token', async (c) => {
+    const token = c.req.param('token');
+    if (!/^[A-Za-z0-9_-]{40,128}$/.test(token)) return customerPage(c, { status: 'invalid_link' });
+    const state = await deps.repository.resolveTableQr(sha256(token), deploymentEnvironment);
+    if (state.status !== 'active' || !state.tableSessionId) return customerPage(c, state);
+    const visit = randomBytes(32).toString('base64url');
+    await deps.repository.createCustomerVisit(
+      state.tableSessionId,
+      sha256(visit),
+      deploymentEnvironment,
+    );
+    customerHeaders(c);
+    return c.redirect(new URL(`/v/${visit}`, deps.config.RESTEC_PUBLIC_BASE_URL).toString(), 303);
+  });
+  app.get('/v/:token', async (c) => {
+    const token = c.req.param('token');
+    if (!/^[A-Za-z0-9_-]{40,128}$/.test(token)) return customerPage(c, { status: 'invalid_link' });
+    return customerPage(
+      c,
+      await deps.repository.resolveCustomerVisit(sha256(token), deploymentEnvironment),
+    );
+  });
   const browserPaymentSession = async (publicId: string) => {
     paymentSessionsAvailable();
     if (!/^rps_(?:test|live)_[A-Za-z0-9]+$/.test(publicId))
@@ -539,12 +699,6 @@ export function createApp(deps: {
     c.header('Pragma', 'no-cache');
     c.header('Referrer-Policy', 'no-referrer');
     if (new Date(session.expiresAt).getTime() <= Date.now()) {
-      if (['requires_customer_action', 'processing'].includes(session.status))
-        await deps.repository.transitionPaymentSession(
-          session.publicPaymentSessionId,
-          'expired',
-          new Date().toISOString(),
-        );
       throw new ApiError(410, 'payment_session_expired', 'The payment session has expired.');
     }
     if (session.status !== 'requires_customer_action')
@@ -648,9 +802,6 @@ export function createApp(deps: {
     const session = await browserPaymentSession(c.req.param('paymentSessionId'));
     c.header('Cache-Control', 'no-store, max-age=0');
     c.header('Referrer-Policy', 'no-referrer');
-    const locallyExpired =
-      new Date(session.expiresAt).getTime() <= Date.now() &&
-      ['creating', 'requires_customer_action', 'processing'].includes(session.status);
     const terminalStatuses = new Set([
       'paid',
       'failed',
@@ -659,7 +810,7 @@ export function createApp(deps: {
       'refunded',
       'partially_refunded',
     ]);
-    const renderedSessionStatus = locallyExpired ? 'expired' : session.status;
+    const renderedSessionStatus = session.status;
     const terminal = terminalStatuses.has(renderedSessionStatus);
     const messages: Record<string, string> = {
       paid: 'Payment confirmed and synchronized through Restec.',
@@ -1028,6 +1179,18 @@ export function createApp(deps: {
                 ? 'refunded'
                 : 'failed',
         },
+        ...(incoming.type === 'payment.refunded' || incoming.type === 'payment.partially_refunded'
+          ? {
+              correction: {
+                correction_id: `cor_${sha256(`${incoming.data.payment.payment_id}:refund:${incoming.data.payment.amount}:${incoming.data.payment.currency}`).slice(0, 24)}`,
+                type: 'refund' as const,
+                original_payment_id: `pay_${sha256(incoming.data.payment.payment_id).slice(0, 20)}`,
+                amount: incoming.data.payment.amount,
+                currency: incoming.data.payment.currency,
+                status: 'completed' as const,
+              },
+            }
+          : {}),
         bill: incoming.data.bill,
       },
     });
@@ -1117,6 +1280,9 @@ export function createApp(deps: {
           eventId: event.publicEventId,
           attempt,
           timeoutMs: deps.config.RESTEC_POS_DELIVERY_TIMEOUT_MS,
+          ...(event.webhookSigningSecret
+            ? { webhookSigningSecret: event.webhookSigningSecret }
+            : {}),
         });
         outcome = result.outcome;
         status = result.status;
@@ -1196,7 +1362,7 @@ export function createApp(deps: {
         location_id: z.string().startsWith('loc_'),
         external_bill_id: z.string().min(1),
         action: z
-          .enum(['compare', 'refresh_private_bill', 'mark_manual_review', 'requeue_pos_event'])
+          .enum(['compare_provider_state', 'compare', 'mark_manual_review', 'requeue_pos_event'])
           .default('compare'),
         event_id: z.string().startsWith('evt_').optional(),
       })
@@ -1224,10 +1390,7 @@ export function createApp(deps: {
       actorId: 'reconciliation_job',
       partnerId: con.partnerId,
       connectionId: con.connectionId,
-      action:
-        input.action === 'refresh_private_bill'
-          ? 'reconciliation.private_bill_refreshed'
-          : 'reconciliation.compared',
+      action: 'reconciliation.provider_state_compared',
       result: result.status,
       targetType: 'bill',
       targetId: input.external_bill_id,
@@ -1370,6 +1533,10 @@ export function createApp(deps: {
         idempotency_conflict: 'The idempotency key conflicts with an earlier operation.',
         bill_version_conflict: 'The supplied bill version conflicts with the current version.',
         payment_in_progress: 'A payment is currently in progress.',
+        payment_capacity_conflict: 'The requested amount exceeds the available bill capacity.',
+        bill_financial_floor_conflict:
+          'The bill total cannot be reduced below completed or protected payments.',
+        payment_outcome_ambiguous: 'The financial outcome requires reconciliation.',
         bill_already_paid: 'The bill is already paid or the amount exceeds the amount due.',
         amount_mismatch: 'The amount or currency does not match the bill.',
         invalid_status_transition: 'The requested payment state transition is not allowed.',
@@ -1387,8 +1554,13 @@ export function createApp(deps: {
       return problem(c, status, error.code, messages[error.code] ?? 'The request conflicts.');
     }
     if (error instanceof PrivateDependencyError) {
-      const status =
-        error.status === 504 ? 504 : [408, 425, 429, 503].includes(error.status) ? 503 : 502;
+      const status = error.financiallyAmbiguous
+        ? 503
+        : error.status === 504
+          ? 504
+          : [408, 425, 429, 503].includes(error.status)
+            ? 503
+            : 502;
       console.error(
         JSON.stringify({
           event: 'restec.dependency_failure',
@@ -1416,9 +1588,11 @@ export function createApp(deps: {
       return problem(
         c,
         status,
-        'dependency_unavailable',
-        'The requested operation could not be completed at this time.',
-        { retryable: error.retryable },
+        error.financiallyAmbiguous ? 'payment_outcome_ambiguous' : 'dependency_unavailable',
+        error.financiallyAmbiguous
+          ? 'The financial outcome is being reconciled. Retry only with the same idempotency key.'
+          : 'The requested operation could not be completed at this time.',
+        { retryable: error.financiallyAmbiguous || error.retryable },
       );
     }
     return problem(c, 500, 'internal_error', 'An internal error occurred.');

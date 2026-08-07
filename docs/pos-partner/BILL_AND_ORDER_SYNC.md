@@ -11,6 +11,8 @@ Lifecycle:
 5. Bill closed: send a higher version with bill and order status `completed`. Never reuse the external bill ID for a later guest.
 6. New bill on the same table: create a different external bill ID at version 1 after the earlier bill is terminal.
 
+A higher-version bill total cannot be lower than the sum of completed payments and amounts currently protected for in-progress or ambiguous outcomes. Restec returns `bill_financial_floor_conflict` before synchronizing an invalid reduction. A bill revision being reconciled also prevents another revision or payment from consuming capacity that the pending total would remove.
+
 The current v1 partner API validates the table mapping during every bill upsert, but it does not expose a stable table/customer-link resolver. A customer payment session produces an opaque Restec-hosted `checkout_url` for that specific bill and session. The POS must use only that returned URL and must never construct a customer URL from identifiers. Stable table-QR reassignment across bill open, move, close, and reuse remains an explicit product decision and is not certified in v1.
 
 Line-item notes and bill-level discount, tax, service charge, and tip totals are supported. Structured modifier arrays and per-line tax/discount allocations are not part of v1; represent non-financial detail in a short item note only when your UAT policy approves it.

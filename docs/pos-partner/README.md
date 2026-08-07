@@ -18,8 +18,11 @@ Money is always an integer number of minor currency units. Cardholder data must 
 - `AUTHENTICATION.md`: credentials and request signing.
 - `API_REFERENCE.md`: verified paths, schemas, and status codes.
 - `BILL_AND_ORDER_SYNC.md`: bill/table lifecycle.
+- `TABLE_AND_QR_SYNC.md`: permanent table QR, table reuse, and customer-visit privacy.
 - `PAYMENT_SYNC.md`: customer payment lifecycle.
 - `TRADITIONAL_PAYMENT_SYNC.md`: cash and physical-terminal reporting.
+- `PARTIAL_AND_MIXED_PAYMENTS.md`: shared balance, partial settlement, and supported method combinations.
+- `REFUNDS_AND_CORRECTIONS.md`: provider-authoritative refunds, immutable correction events, and unsupported correction operations.
 - `WEBHOOKS.md`: event body, verification, acknowledgement, and deduplication.
 - `IDEMPOTENCY_RETRIES.md`: safe request and webhook retry behavior.
 - `ERRORS.md`: problem response format and stable codes.

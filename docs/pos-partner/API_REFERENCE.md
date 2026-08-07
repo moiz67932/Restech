@@ -27,3 +27,5 @@ Required: positive `amount_minor`, `currency: PKR`, and `method: card`. Optional
 ## Responses
 
 Successful state responses contain only Restec public identifiers and POS identifiers. Restec API operations return 200 or 201 as listed above; a POS webhook receiver may acknowledge with 200, 201, 202, or 204. Error outcomes include 400, 401, 403, 404, 409, 413, 422, 429, 500, 502, 503, and 504 where documented in OpenAPI. See `ERRORS.md` for retry classification.
+
+`amount_due` is the economic unpaid amount and does not include a public breakdown of temporary payment protection. A mutation succeeds only when its amount fits Restec's authoritative available capacity after completed, active, and ambiguous payments are considered.

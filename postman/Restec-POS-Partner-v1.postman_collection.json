@@ -74,6 +74,18 @@
     },
     {
       "name": "Record external payment",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Payment succeeds or returns a documented capacity/reconciliation result', () => pm.expect([200, 409, 503]).to.include(pm.response.code));",
+              "if (pm.response.code !== 200) pm.expect(['payment_capacity_conflict','payment_outcome_ambiguous','bill_already_paid']).to.include(pm.response.json().code);"
+            ]
+          }
+        }
+      ],
       "request": {
         "method": "POST",
         "header": [
@@ -87,7 +99,158 @@
           "mode": "raw",
           "raw": "{\"external_payment_id\":\"POSPAY-1001\",\"method\":\"card_terminal\",\"amount\":10000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-07-18T10:45:00Z\",\"metadata\":{}}"
         },
-        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments"
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Run after bill creation. Re-run unchanged to certify idempotent replay. A concurrent channel may produce payment_capacity_conflict; an uncertain synchronized outcome produces payment_outcome_ambiguous and must be retried with this same key/body."
+      }
+    },
+    {
+      "name": "Conflicting external payment identity",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Conflicting identity is rejected', () => pm.expect(pm.response.code).to.eql(409));",
+              "pm.test('Conflict has a stable code', () => pm.expect(['idempotency_conflict','payment_capacity_conflict','bill_already_paid']).to.include(pm.response.json().code));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-POSPAY-1001-conflict" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"POSPAY-1001\",\"method\":\"card_terminal\",\"amount\":9999,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-07-18T10:45:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Run after Record external payment. Reusing its external payment identity with different facts must never mutate money."
+      }
+    },
+    {
+      "name": "Full cash payment",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-CASH-FULL-1001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"CASH-FULL-1001\",\"method\":\"cash\",\"amount\":10000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-08-07T10:45:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Run against a fresh 10,000-minor-unit bill. Repeat unchanged with the same key to verify replay."
+      }
+    },
+    {
+      "name": "Partial cash payment for mixed settlement",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-CASH-PARTIAL-1001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"CASH-PARTIAL-1001\",\"method\":\"cash\",\"amount\":2000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-08-07T10:45:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Leaves 8,000 due on a fresh 10,000 bill. Follow with hosted digital or terminal examples using only remaining capacity."
+      }
+    },
+    {
+      "name": "Partial physical-terminal payment",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-TERMINAL-PARTIAL-1001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"TERMINAL-PARTIAL-1001\",\"method\":\"card_terminal\",\"amount\":4000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-08-07T10:46:00Z\",\"processor_reference\":\"sandbox-terminal-1001\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Use after a 2,000 cash partial or before a 4,000 hosted session to demonstrate three-way mixed settlement."
+      }
+    },
+    {
+      "name": "Reject unsupported pending terminal state",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Pending terminal fact is rejected', () => pm.expect(pm.response.code).to.eql(422));",
+              "pm.test('No financial fact is accepted', () => pm.expect(pm.response.json().code).to.eql('invalid_request'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-TERMINAL-PENDING-REJECT" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"TERMINAL-PENDING-REJECT\",\"method\":\"card_terminal\",\"amount\":4000,\"currency\":\"PKR\",\"status\":\"pending\",\"occurred_at\":\"2026-08-07T10:46:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Restec v1 accepts completed traditional facts only. Pending, declined, cancelled, voided, and reversed remain POS-owned."
+      }
+    },
+    {
+      "name": "Insufficient available capacity",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Unavailable capacity is rejected', () => pm.expect(pm.response.code).to.eql(409));",
+              "pm.test('No replacement payment is suggested', () => pm.expect(['payment_capacity_conflict','bill_already_paid']).to.include(pm.response.json().code));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Restec-Timestamp", "value": "{{timestamp}}" },
+          { "key": "X-Restec-Signature", "value": "{{signature}}" },
+          { "key": "X-Request-Id", "value": "{{request_id}}" },
+          { "key": "Idempotency-Key", "value": "payment-POSPAY-OVER-CAPACITY" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"external_payment_id\":\"POSPAY-OVER-CAPACITY\",\"method\":\"cash\",\"amount\":10000,\"currency\":\"PKR\",\"status\":\"completed\",\"occurred_at\":\"2026-07-18T10:46:00Z\",\"metadata\":{}}"
+        },
+        "url": "{{base_url}}/v1/locations/{{location_id}}/bills/{{external_bill_id}}/external-payments",
+        "description": "Run after a full-balance payment or while another channel protects the balance. The request must not create a second financial effect."
       }
     },
     {

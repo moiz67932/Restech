@@ -136,6 +136,8 @@ paths:
       description: |
         Creates a hosted payment session in `requires_customer_action`. Open the returned
         Restec checkout URL. Do not send PAN, CVV, expiry, PIN, OTP, or track data.
+        One active or ambiguous hosted session is allowed per bill. Traditional completed
+        payments may use only capacity not protected by that session.
         The route returns 404 while payment sessions are disabled for an environment.
       requestBody:
         required: true
@@ -172,7 +174,10 @@ paths:
     get:
       tags: [Payment Sessions]
       operationId: getPaymentSession
-      description: Returns the current Restec payment state. The signed GET body is empty.
+      description: |
+        Returns the current authoritative Restec payment state. The signed GET body is empty.
+        `expires_at` is a customer-action deadline; it does not by itself release financial
+        capacity. Provider events and scheduler reconciliation determine terminal expiry.
       responses:
         '200':
           description: Current payment session state
@@ -473,7 +478,12 @@ components:
         amount_minor: { type: integer, minimum: 1 }
         currency: { const: PKR }
         method: { const: card }
-        expires_at: { type: string, format: date-time }
+        expires_at:
+          {
+            type: string,
+            format: date-time,
+            description: Customer-action deadline; not standalone financial expiry proof.,
+          }
         created_at: { type: string, format: date-time }
     PaymentSessionStatus:
       type: object
@@ -692,6 +702,9 @@ components:
             - idempotency_conflict
             - bill_version_conflict
             - payment_in_progress
+            - payment_capacity_conflict
+            - bill_financial_floor_conflict
+            - payment_outcome_ambiguous
             - bill_already_paid
             - payload_too_large
             - amount_mismatch

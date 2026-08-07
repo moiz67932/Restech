@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  paymentSessionStatusSchema,
   privatePaymentSessionResponseSchema,
   type CanonicalBillInput,
   type CanonicalExternalPaymentInput,
@@ -122,6 +123,7 @@ export class PrivateDependencyError extends Error {
   public readonly providerRequestId: string | undefined;
   public readonly attempts: number | undefined;
   public readonly responseDiagnostics: PrivateResponseDiagnostics | undefined;
+  public financiallyAmbiguous = false;
 
   constructor(retryable: boolean, status: number, diagnostics: PrivateDependencyDiagnostics = {}) {
     super('Private dependency request failed');
@@ -491,18 +493,23 @@ export class PaelyClient {
       undefined,
       'payment_session_get',
     )) as PrivatePaymentSessionState;
+    const parsedStatus = paymentSessionStatusSchema.safeParse(data?.status);
     if (
       !data ||
       typeof data.privatePaymentSessionId !== 'string' ||
-      typeof data.status !== 'string' ||
+      data.privatePaymentSessionId !== privatePaymentSessionId ||
+      !parsedStatus.success ||
       !Number.isSafeInteger(data.amountMinor) ||
-      data.currency !== 'PKR'
+      data.amountMinor <= 0 ||
+      data.currency !== 'PKR' ||
+      typeof data.expiresAt !== 'string' ||
+      !Number.isFinite(new Date(data.expiresAt).getTime())
     )
       throw new PrivateDependencyError(false, 502, {
         operation: 'payment_session_get',
         failureKind: 'invalid_response',
       });
-    return data;
+    return { ...data, status: parsedStatus.data };
   }
   private async request(
     method: string,

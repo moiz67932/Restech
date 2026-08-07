@@ -1,5 +1,11 @@
 # UAT test plan
 
+## Table QR lifecycle
+
+- Open, update, move, complete, and cancel a mapped-table bill.
+- Reuse a table after close; refresh the old customer visit and confirm it cannot show the new bill.
+- Confirm simultaneous open conflicts, stale bill rejection, no-bill scans, multiple scans, disabled table, and QR rotation.
+
 Retain only public IDs, request IDs, event IDs, timestamps, statuses, and sanitized response evidence.
 
 | #   | Test                                                | Expected result                                       |
@@ -22,6 +28,23 @@ Retain only public IDs, request IDs, event IDs, timestamps, statuses, and saniti
 | 16  | Attempt sandbox/production crossover                | Rejected; no state crosses environments               |
 | 17  | Run concurrent deliveries                           | POS unique event constraint prevents duplicates       |
 | 18  | Compare final bill and POS states                   | Amount, currency, status, and balance agree           |
+| 19  | Submit two full-balance cash payments concurrently  | One succeeds; only one reaches financial completion   |
+| 20  | Submit full-balance cash and digital concurrently   | Only the first protected channel owns the capacity    |
+| 21  | Reduce a bill below an active protected amount      | `bill_financial_floor_conflict`; no downstream update |
+| 22  | Simulate an ambiguous downstream payment outcome    | Capacity stays protected; same-key retry reconciles   |
+| 23  | Close the browser and never return                  | Scheduler/provider evidence completes safely          |
+| 24  | Let local expiry pass while provider remains active | Capacity stays protected; no false expiry event       |
+| 25  | Provider confirms expiry                            | One expiry state/event; capacity is released          |
+| 26  | Run expiry scheduler twice                          | Second run makes no release or event                  |
+| 27  | Race provider paid with expiry                      | Paid wins or conflict is review-required; no overpay  |
+| 28  | Deliver failure then late paid                      | Capacity-checked late paid; paid never regresses      |
+| 29  | Deliver cancellation then late paid                 | Capacity-checked late paid; paid never regresses      |
+| 30  | Cash plus cash partials                             | Exact final zero due; one fact per identity           |
+| 31  | Cash plus terminal                                  | Shared balance settles without overpayment            |
+| 32  | Cash plus hosted digital                            | Digital reserve protects only its amount              |
+| 33  | Terminal plus hosted digital                        | Both fit shared capacity                              |
+| 34  | Cash plus digital plus terminal                     | Three-way total settles exactly                       |
+| 35  | Submit pending/declined/cancelled POS status        | 422; no private or local financial write              |
 
 UAT passes only when every required case has deterministic evidence and no credentials or card data appear in captures.
 

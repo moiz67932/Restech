@@ -37,6 +37,18 @@ export const canonicalRestConnector: PosConnector = {
         currency: event.data.payment.currency,
         payment_method: event.data.payment.method,
         payment_status: event.data.payment.status,
+        ...(event.data.correction
+          ? {
+              correction: {
+                correction_id: event.data.correction.correction_id,
+                type: event.data.correction.type,
+                original_payment_id: event.data.correction.original_payment_id,
+                amount_minor: event.data.correction.amount,
+                currency: event.data.correction.currency,
+                status: event.data.correction.status,
+              },
+            }
+          : {}),
         bill: event.data.bill,
         metadata: {},
       }),
@@ -45,7 +57,8 @@ export const canonicalRestConnector: PosConnector = {
     return { body, destination };
   },
   async deliverEvent(payload, ctx) {
-    const secret = String(ctx.configuration.webhook_secret ?? '');
+    const secret = ctx.webhookSigningSecret ?? String(ctx.configuration.webhook_secret ?? '');
+    if (!secret) return { outcome: 'permanent_failure', errorCode: 'webhook_secret_unavailable' };
     const timestamp = Math.floor(Date.now() / 1000);
     try {
       const response = await fetch(payload.destination, {

@@ -25,6 +25,8 @@ export interface ConnectorDeliveryContext extends ConnectorContext {
   eventId: string;
   attempt: number;
   timeoutMs: number;
+  /** The event-bound secret. Legacy connectors may fall back to configuration. */
+  webhookSigningSecret?: string;
 }
 export interface ConnectorDeliveryResult {
   outcome: 'delivered' | 'retry' | 'permanent_failure';

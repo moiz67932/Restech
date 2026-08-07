@@ -14,6 +14,7 @@ const schema = z.object({
   NODE_ENV: defaultedEnv(z.enum(['development', 'test', 'production']), 'development'),
   RESTEC_ENV: z.enum(['sandbox', 'production', 'test']),
   RESTEC_REPOSITORY_DRIVER: z.enum(['memory', 'supabase']),
+  RESTEC_DATABASE_CERTIFICATION: optionalEnv(envBoolean),
   RESTEC_PUBLIC_BASE_URL: z.string().url(),
   RESTEC_PAYMENT_SESSIONS_ENABLED: envBoolean,
   RESTEC_PAYMENT_SESSION_TTL_SECONDS: defaultedEnv(z.coerce.number().int().min(300).max(3600), 900),
@@ -54,6 +55,8 @@ const schema = z.object({
 export type Config = z.infer<typeof schema>;
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const config = schema.parse(env);
+  if (config.RESTEC_DATABASE_CERTIFICATION && config.RESTEC_REPOSITORY_DRIVER === 'memory')
+    throw new Error('RESTEC_DATABASE_CERTIFICATION forbids MemoryRepository.');
   if (
     (config.RESTEC_ENV === 'sandbox' || config.RESTEC_ENV === 'production') &&
     config.RESTEC_REPOSITORY_DRIVER !== 'supabase'

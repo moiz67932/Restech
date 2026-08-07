@@ -12,6 +12,7 @@ Safe retry guidance:
 - Otherwise use exponential backoff with jitter: about 1, 2, 4, 8, 16, 30, then 60 seconds.
 - Stop automatic API retries after 15 minutes and reconcile with a GET before operator review.
 - Do not retry 400, 401, 403, 404, 409, 413, or 422 without correcting the cause. A 409 marked retryable may be retried after a short delay with the same body and key.
+- `payment_outcome_ambiguous` is different from an ordinary availability failure: Restec continues protecting the amount. Retry only the same logical operation with the exact body and key; do not create a replacement payment identity.
 
 A duplicate identical mutation returns the original status and response. A reused key with a different method, path, or body returns `idempotency_conflict`. Bill versions add a second invariant: same version plus same bytes is safe; same version plus different bytes is `bill_version_conflict`.
 

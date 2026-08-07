@@ -51,8 +51,11 @@ export const nav: Array<[string, string[]]> = [
     'Build',
     [
       'bill-and-order-sync',
+      'table-and-qr-sync',
       'payment-sync',
       'traditional-payment-sync',
+      'partial-and-mixed-payments',
+      'refunds-and-corrections',
       'webhooks',
       'idempotency-retries',
     ],

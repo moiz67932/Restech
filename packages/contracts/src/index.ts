@@ -164,6 +164,17 @@ export const eventSchema = z
             status: z.string(),
           })
           .strict(),
+        correction: z
+          .object({
+            correction_id: z.string().regex(/^cor_[A-Za-z0-9]+$/),
+            type: z.literal('refund'),
+            original_payment_id: publicIds.payment,
+            amount: minorAmount.positive(),
+            currency: z.string().regex(/^[A-Z]{3}$/),
+            status: z.enum(['completed', 'ambiguous', 'review_required']),
+          })
+          .strict()
+          .optional(),
         bill: z
           .object({
             grand_total: minorAmount,
@@ -180,7 +191,7 @@ export const eventSchema = z
   .strict()
   .superRefine((event, ctx) => {
     const { bill } = event.data;
-    if (bill.amount_due !== Math.max(0, bill.grand_total - bill.amount_paid + bill.amount_refunded))
+    if (bill.amount_due !== Math.max(0, bill.grand_total - bill.amount_paid))
       ctx.addIssue({
         code: 'custom',
         path: ['data', 'bill', 'amount_due'],
@@ -223,6 +234,17 @@ export const partnerWebhookEventSchema = z
       'other',
     ]),
     payment_status: z.enum(['completed', 'failed', 'refunded']),
+    correction: z
+      .object({
+        correction_id: z.string().regex(/^cor_[A-Za-z0-9]+$/),
+        type: z.literal('refund'),
+        original_payment_id: publicIds.payment,
+        amount_minor: minorAmount.positive(),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        status: z.enum(['completed', 'ambiguous', 'review_required']),
+      })
+      .strict()
+      .optional(),
     bill: z
       .object({
         grand_total: minorAmount,
@@ -267,6 +289,11 @@ export type PublicErrorCode =
   | 'invalid_status_transition'
   | 'bill_not_payable'
   | 'amount_exceeds_balance'
+  | 'payment_capacity_conflict'
+  | 'table_active_bill_conflict'
+  | 'bill_table_generation_conflict'
+  | 'bill_financial_floor_conflict'
+  | 'payment_outcome_ambiguous'
   | 'currency_not_supported'
   | 'payment_method_not_available'
   | 'payment_session_expired'

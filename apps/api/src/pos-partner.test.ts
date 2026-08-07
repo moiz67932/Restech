@@ -267,3 +267,32 @@ test('amount and currency mismatch returns a validation problem without a financ
   assert.equal(((await response.json()) as any).code, 'amount_mismatch');
   assert.equal(calls(), 0);
 });
+
+test('traditional v1 rejects every non-completed POS payment state without a financial write', async () => {
+  for (const status of ['pending', 'declined', 'cancelled', 'voided', 'reversed', 'refunded']) {
+    const { app, apiKey, calls, repo } = fixture();
+    const path = '/v1/locations/loc_allowed/bills/BILL-1/external-payments';
+    const body = JSON.stringify({
+      external_payment_id: `PAY-${status}`,
+      method: 'card_terminal',
+      amount: 1_000,
+      currency: 'PKR',
+      status,
+      occurred_at: '2026-08-07T10:00:00Z',
+      metadata: {},
+    });
+    const response = await signed(
+      app,
+      apiKey,
+      'POST',
+      path,
+      body,
+      `req_reject_${status}`,
+      `reject-${status}`,
+    );
+    assert.equal(response.status, 422, status);
+    assert.equal(((await response.json()) as any).code, 'invalid_request');
+    assert.equal(calls(), 0);
+    assert.equal(repo.financialReservations.size, 0);
+  }
+});

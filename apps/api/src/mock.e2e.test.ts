@@ -251,7 +251,7 @@ test('mock POS bill reaches mock private service and payment event reaches POS o
   assert.equal((await repo.getBill('con_test', 'INV-1001'))?.payment_status, 'paid');
 });
 
-test('private dependency diagnostics are logged internally while the public 502 stays sanitized', async () => {
+test('post-send dependency ambiguity is logged internally while the public 503 stays sanitized', async () => {
   const repo = new MemoryRepository();
   const apiKey = 'rst_test_aaaaaaaaaaaaexample';
   repo.credentials.set(apiKey, {
@@ -364,14 +364,14 @@ test('private dependency diagnostics are logged internally while the public 502 
       },
       body,
     });
-    assert.equal(response.status, 502);
+    assert.equal(response.status, 503);
     assert.match(response.headers.get('content-type') ?? '', /^application\/problem\+json/);
     const problem = (await response.json()) as any;
-    assert.equal(problem.status, 502);
-    assert.equal(problem.code, 'dependency_unavailable');
+    assert.equal(problem.status, 503);
+    assert.equal(problem.code, 'payment_outcome_ambiguous');
     assert.equal(problem.request_id, requestId);
     assert.equal(problem.retryable, true);
-    assert.equal(problem.error.code, 'dependency_unavailable');
+    assert.equal(problem.error.code, 'payment_outcome_ambiguous');
   } finally {
     console.error = originalConsoleError;
   }

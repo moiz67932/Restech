@@ -24,8 +24,10 @@ construct customer links from identifiers or reuse a terminal bill ID.
 
 Report only completed cash, card-terminal, wallet-terminal, voucher, or
 approved other payments to the external-payments endpoint. Never send
-cardholder data. Retry an ambiguous mutation with the same key and bytes, then
-reconcile through the bill GET endpoint.
+cardholder data. Restec protects capacity across POS and customer-payment
+channels before synchronization. Retry an ambiguous mutation with the same key
+and bytes, never a replacement payment ID, then reconcile through the bill GET
+endpoint.
 
 ## Webhooks and reconciliation
 

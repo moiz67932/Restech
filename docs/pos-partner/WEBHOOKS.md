@@ -14,6 +14,8 @@ Required headers:
 
 The JSON body contains `event_id`, `event_type`, `event_version`, `occurred_at`, `environment`, `partner_id`, `location_id`, `external_bill_id`, optional `payment_session_id`, `payment_reference`, `amount_minor`, `currency`, `payment_method`, `payment_status`, `bill`, and `metadata`.
 
+Normal digital terminal notifications are `payment.completed`, `payment.failed`, and `payment.expired`. Provider cancellation uses the v1 failed-family event while the payment-session status endpoint reports `cancelled`. Multiple technical provider or scheduler observations of the same logical session terminal state reuse one Restec event identity; delivery retries also retain that identity.
+
 Canonical signing input:
 
 ```text
@@ -33,3 +35,12 @@ Processing order:
 If the unique insert reports an existing identical event, return a supported 2xx without applying another financial action. If the same event ID has different content, reject it and escalate.
 
 Restec retries network failures and HTTP 408, 425, 429, 500, 502, 503, and 504. Other 4xx responses are permanent failures. Delays are 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, 6 hours, then 12 hours capped. Exhausted events enter manual review.
+# Financial correction events
+
+Refund notifications are provider-authoritative correction facts. They include a safe Restec `correction_id`, the original Restec payment ID, amount, currency, and correction status. A repeated delivery or a different technical provider event for the same logical refund must be treated as one correction. The original payment remains historical truth; see `REFUNDS_AND_CORRECTIONS.md`.
+
+## Signing-secret rotation
+
+Restec rotates webhook signing secrets with a controlled grace window. A newly issued secret is shown to the authorized operator once. During grace, the POS should accept the currently supported secret versions. Restec keeps queued delivery attempts bound to the secret version selected when each event entered the outbox, so rotation does not change `event_id`, payload, or event meaning. Do not disable the prior secret until Restec confirms the grace window has ended and queued work is resolved.
+
+After grace, the prior secret is retired for new events. Emergency revocation is immediate and may make deliveries signed with the revoked version fail closed; Restec will coordinate an audited recovery path rather than silently dropping or changing the event.

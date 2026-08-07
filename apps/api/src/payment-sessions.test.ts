@@ -190,6 +190,28 @@ async function createHostedPaymentSession(
   return ((await response.json()) as { payment_session_id: string }).payment_session_id;
 }
 
+test('local checkout deadline blocks browser action but never terminalizes financial state', async () => {
+  const { app, repo } = fixture();
+  const publicId = await createHostedPaymentSession(app, 'local-expiry-is-not-authority');
+  const session = (await repo.getPaymentSession(publicId))!;
+  repo.paymentSessions.set(publicId, {
+    ...session,
+    expiresAt: new Date(Date.now() - 1_000).toISOString(),
+  });
+  const checkout = await app.request(`/s/${publicId}`);
+  assert.equal(checkout.status, 410);
+  assert.equal((await repo.getPaymentSession(publicId))?.status, 'requires_customer_action');
+  assert.equal(
+    repo.financialReservations.get(`con_test:payment_session:${publicId}`)?.state,
+    'reserved',
+  );
+  const returned = await app.request(`/s/${publicId}/return`);
+  const html = await returned.text();
+  assert.equal(returned.status, 200);
+  assert.match(html, /confirmation_pending/);
+  assert.match(html, /http-equiv="refresh"/);
+});
+
 test('customer return polling stops for every terminal payment-session state', async (t) => {
   for (const terminal of [
     'paid',
